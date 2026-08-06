@@ -74,8 +74,7 @@ $$a_i = \frac{e^{s_i}}{e^{s_0} + \sum_{j} e^{s_j}}$$
 - 用 **Sinkhorn-Knopp 算法**（max=20 次迭代）投影到双随机矩阵；输入/输出映射用 Sigmoid 约束非负有界。
 - 参数动态生成（输入相关 + 输入无关分量）。
 - 工程上把 mHC 墙钟开销控制在重叠后 1F1B 流水线阶段的 **6.7%**（融合核 + 重计算 + 调整 DualPipe）。
-![[Pasted image 20260806170537.png]]
-
+![[Pasted image 20260806170532.png]]
 **核心约束——双随机矩阵（Birkhoff 多面体）：** 残差映射矩阵 $\mathbf{M}$ 被约束为非负、且行和、列和都为 1 的双随机矩阵，从而谱范数 $\|\mathbf{M}\|_2 \le 1$（映射非扩张，深层堆叠不放大数值）：
 
 $$\mathbf{M}\in\mathcal{B}=\Big\{\,\mathbf{M}\in\mathbb{R}^{n\times n}\ \big|\ M_{ij}\ge 0,\ \textstyle\sum_i M_{ij}=1,\ \sum_j M_{ij}=1\,\Big\}$$
