@@ -1,0 +1,24 @@
+{
+  "id": "conv-1785836393322-6fkgqqc1i",
+  "providerId": "claude",
+  "title": "你是谁",
+  "titleGenerationStatus": "failed",
+  "createdAt": 1785836393329,
+  "updatedAt": 1785836575738,
+  "lastResponseAt": 1785836423195,
+  "sessionId": "9b79a5e4-04cd-487e-a198-ab82b96efab4",
+  "selectedModel": "opus",
+  "providerState": {
+    "providerSessionId": "9b79a5e4-04cd-487e-a198-ab82b96efab4"
+  },
+  "currentNote": "欢迎.md",
+  "usage": {
+    "model": "opus",
+    "inputTokens": 2,
+    "cacheCreationInputTokens": 2307,
+    "cacheReadInputTokens": 42958,
+    "contextWindow": 1000000,
+    "contextTokens": 45267,
+    "percentage": 5
+  }
+}

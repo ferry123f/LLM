@@ -1,0 +1,23 @@
+{
+  "id": "conv-1785837177948-a55rpz90i",
+  "providerId": "claude",
+  "title": "加到wiki",
+  "titleGenerationStatus": "failed",
+  "createdAt": 1785837177952,
+  "updatedAt": 1786006809172,
+  "lastResponseAt": 1786006809172,
+  "sessionId": "530eaac5-ad2b-4313-aa4b-d9546878cff4",
+  "selectedModel": "opus",
+  "providerState": {
+    "providerSessionId": "530eaac5-ad2b-4313-aa4b-d9546878cff4"
+  },
+  "usage": {
+    "model": "opus",
+    "inputTokens": 2,
+    "cacheCreationInputTokens": 316,
+    "cacheReadInputTokens": 103381,
+    "contextWindow": 1000000,
+    "contextTokens": 103699,
+    "percentage": 10
+  }
+}
