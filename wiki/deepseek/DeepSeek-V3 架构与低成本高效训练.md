@@ -28,11 +28,23 @@
 
 ## 三大架构支柱
 
+V3 的基本架构（论文 Figure 2）——上半部是 **DeepSeekMoE**（共享专家 + Router 选 Top-K 路由专家），下半部是 **MLA**（输入先压成 latent 向量，再分出带 RoPE 的位置分支，只缓存打阴影的部分）：
+
+![[deepseek-v3-arch-mla-moe.png]]
+
 ### 1. MLA：多头潜在注意力（省 KV 缓存）
 
 - 对 Key/Value 做**低秩联合压缩**：KV 压缩维 512、Query 压缩维 1536，推理时只缓存压缩后的潜在向量，KV 缓存大幅缩小。
 - **解耦 RoPE**：位置编码走单独的小维度分支，避免和压缩表示纠缠。
 - 效果：显存占用远小于标准 MHA，性能不降。
+
+**核心公式：** 先把输入 $\mathbf{h}_t$ 压成一个低维潜在向量 $\mathbf{c}_t^{KV}$（维度 $d_c \ll d_h n_h$），推理时**只缓存这个 $\mathbf{c}_t^{KV}$ 和一路共享的 RoPE 键 $\mathbf{k}_t^R$**，用时再上投影还原出各头的 K/V：
+
+$$\mathbf{c}_t^{KV} = W^{DKV}\,\mathbf{h}_t \qquad(\text{下投影压缩})$$
+$$\mathbf{k}_{t}^{C} = W^{UK}\,\mathbf{c}_t^{KV},\qquad \mathbf{v}_{t}^{C} = W^{UV}\,\mathbf{c}_t^{KV}\qquad(\text{用时上投影还原})$$
+$$\mathbf{k}_{t,i} = [\,\mathbf{k}_{t,i}^{C};\ \mathbf{k}_t^{R}\,],\qquad \mathbf{k}_t^{R}=\mathrm{RoPE}(W^{KR}\mathbf{h}_t)\qquad(\text{拼接解耦的位置分支})$$
+
+> 直觉：标准注意力要缓存每个头完整的 K、V；MLA 只存一份被压缩了几十倍的 $\mathbf{c}_t^{KV}$，这正是"省 KV 缓存"的来源。
 
 ### 2. DeepSeekMoE + 无辅助损失负载均衡（首创）
 
@@ -41,11 +53,23 @@
 - 仅保留一个权重极小（α=0.0001）的**序列级均衡损失**兜底，防止单条序列内极端不均。
 - **节点受限路由**（每 Token ≤4 节点）+ 全程**不丢弃任何 Token**。
 
+**核心公式：** 关键在于路由用的门控值 $g$ 里加了一个**可动态调整的偏置 $b_i$**——选专家时用"亲和度 + 偏置"排序，但真正的加权求和**只用原始亲和度 $s_{i,t}$**，所以偏置只改"选谁"、不污染"权重"：
+
+$$g_{i,t} = \begin{cases} s_{i,t}, & s_{i,t}+b_i \in \operatorname{Top\text{-}}K_r(\{s_{j,t}+b_j\}) \\ 0, & \text{否则} \end{cases}$$
+
+每步结束后，按各专家的负载更新偏置：**过载的专家调低 $b_i$、欠载的调高**，从而无需辅助损失就把流量均匀摊开：
+
+$$b_i \leftarrow b_i - \gamma\,\mathrm{sign}(\text{load}_i - \overline{\text{load}})$$
+
 ### 3. MTP：多 Token 预测（训练目标）
 
 - 训练时额外预测未来 **D=1** 个 Token。与 Meta 的并行预测不同，V3 用**串行 MTP 模块**并保留完整因果链。
 - 每个 MTP 模块与主模型**共享 embedding 和输出头**，只额外带一个 Transformer 块 + 投影矩阵，开销小。
 - **推理时可直接丢弃** MTP 模块（主模型独立工作）；也可复用它做**投机解码（speculative decoding）**——第二个 Token 接受率达 **85%–90%**，端到端 TPS 提升约 **1.8×**。
+
+论文 Figure 3——主模型预测下一个 Token，MTP Module 1/2 依次串行预测再下一个、再再下一个，Embedding 与 Output Head 全程共享（图中 *Shared*），每个模块各出一份交叉熵损失：
+
+![[deepseek-v3-mtp.png]]
 
 ## 基础设施：让 FP8 训练在超大规模跑通
 
@@ -56,6 +80,10 @@
   - **提升累加精度**——每累加约 128 个元素就**搬到 CUDA Core 用 FP32 累加**，弥补 Tensor Core 累加位宽不足。
   - 全部张量用 **E4M3**、在线量化；缓存激活/通信用低精度。
   - 相对 BF16 基线，训练 loss 误差 **< 0.25%**。
+
+论文 Figure 6——三个最重的矩阵乘 **Fprop（前向）/ Dgrad（激活反向）/ Wgrad（权重反向）走 FP8**，而累加、主权重、优化器状态保留 **FP32/BF16** 高精度，兼顾速度与稳定：
+
+![[deepseek-v3-fp8-framework.png]]
 - **显存优化**：重算 RMSNorm/MLA 上投影、EMA 放 CPU、MTP 与主模型共享 embedding/输出头——**全程不需要张量并行**。
 - 集群：2048 张 H800，16 路 PP + 64 路 EP + ZeRO-1 DP。
 - 还向硬件厂商提了建议：Tensor Core 需要更高累加精度、原生支持 tile/block 量化与在线量化、转置 GEMM 等。

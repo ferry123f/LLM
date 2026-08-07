@@ -71,6 +71,34 @@
       "contentDigest": "a3b6c26daf3e9badc47be359bd253b9ca5f02791be96d2acb8f6a0224e31c9b6",
       "providerUserMessageId": "7c81e5d5-339c-42bb-8427-f3c484971bc6",
       "providerAssistantMessageId": "54c06c2d-7277-4ef1-b3c8-a33891d16ca0"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1786065084326-7ieydg0",
+      "userTurnOrdinal": 6,
+      "state": "accepted",
+      "localMessageId": "msg-1786065084298-w7delsm",
+      "timestamp": 1786065084298,
+      "rawDisplayText": "把deepseek v4的三个主要的核心原理 用一段话讲明白",
+      "canonicalText": "把deepseek v4的三个主要的核心原理 用一段话讲明白",
+      "images": [],
+      "contentDigest": "672414bc5a493ef91a38edfafb13877b77b41cd7e02b5cf4d80682d4ede8031a",
+      "providerUserMessageId": "a4e1c7ac-8a8c-41a7-b965-6f70649daac5",
+      "providerAssistantMessageId": "81ac6e5d-0037-4c7c-a8e5-93790b9dde12"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1786092330182-m455u3s",
+      "userTurnOrdinal": 7,
+      "state": "accepted",
+      "localMessageId": "msg-1786092330175-g8xerqm",
+      "timestamp": 1786092330175,
+      "rawDisplayText": "deepseekv3也类似于deepseekv4加上公式和图便于学习和理解",
+      "canonicalText": "deepseekv3也类似于deepseekv4加上公式和图便于学习和理解",
+      "images": [],
+      "contentDigest": "c0c6bfd7c3ae44e56ec713fdb2fae0b33c228c616a72a0cf9cfca0f6698d8ca0",
+      "providerUserMessageId": "d9946f0d-fc9b-42a2-b9a3-08fc7f4f56a3",
+      "providerAssistantMessageId": "fd0c8965-a536-40a4-bed4-ed097ba6b950"
     }
   ]
 }
