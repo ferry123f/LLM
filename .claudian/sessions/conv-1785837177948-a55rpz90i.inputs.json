@@ -99,6 +99,48 @@
       "contentDigest": "c0c6bfd7c3ae44e56ec713fdb2fae0b33c228c616a72a0cf9cfca0f6698d8ca0",
       "providerUserMessageId": "d9946f0d-fc9b-42a2-b9a3-08fc7f4f56a3",
       "providerAssistantMessageId": "fd0c8965-a536-40a4-bed4-ed097ba6b950"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1786332638567-icoyaro",
+      "userTurnOrdinal": 8,
+      "state": "accepted",
+      "localMessageId": "msg-1786332638538-yp7fwsa",
+      "timestamp": 1786332638538,
+      "rawDisplayText": "对目前总结的docker操作继续丰富 有错误的地方进行改进",
+      "canonicalText": "对目前总结的docker操作继续丰富 有错误的地方进行改进",
+      "images": [],
+      "contentDigest": "f27bbc9f95854854f83863994e5b672ecc29d32314f37ab9a0f68f018dda5b3e",
+      "providerUserMessageId": "58d7cd1b-fef4-4df4-a9a6-6e29d3196473",
+      "providerAssistantMessageId": "d535c6c2-a402-405e-b64c-6cc02867fb5a"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1786333083506-bp4whl3",
+      "userTurnOrdinal": 9,
+      "state": "accepted",
+      "localMessageId": "msg-1786333083502-nb0nm2z",
+      "timestamp": 1786333083502,
+      "rawDisplayText": "在benchmark中分析一下bench serve和throught两个命令的参数以及参数意义 形成一个详细的学习资料",
+      "canonicalText": "在benchmark中分析一下bench serve和throught两个命令的参数以及参数意义 形成一个详细的学习资料",
+      "images": [],
+      "contentDigest": "6315f9e16dabea07cfac04f786cdd7bd92289af33cdf54456873328f73a14139",
+      "providerUserMessageId": "6eea14ce-6d9b-467a-8053-0016545713ba",
+      "providerAssistantMessageId": "cf6f6ad8-f388-42d1-8ca4-110b4aeb7d34"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1786340662681-okyyeab",
+      "userTurnOrdinal": 10,
+      "state": "accepted",
+      "localMessageId": "msg-1786340662678-b00cxdt",
+      "timestamp": 1786340662678,
+      "rawDisplayText": "1",
+      "canonicalText": "1",
+      "images": [],
+      "contentDigest": "b03f38f260c9190224b5f5c2ff27d2f41a7ca7215b4c1d8e04a68a5dc9890b6b",
+      "providerUserMessageId": "8569c57a-8d8f-4669-8c19-76c39c418901",
+      "providerAssistantMessageId": "d9cb5ac2-0a08-4379-b9dc-633cb20392d1"
     }
   ]
 }

@@ -27,3 +27,19 @@
 - 嵌入官方图：基本架构 MLA+DeepSeekMoE（Fig2）、MTP 串行因果链（Fig3）、FP8 混合精度框架（Fig6）
 - 加入 LaTeX 公式：MLA 低秩压缩/上投影/解耦 RoPE、无辅助损失均衡的偏置门控 + 偏置更新
 - raw 未改动，仅渲染读取
+
+## [2026-08-10] edit | docker 常用命令（纠错 + 丰富）
+- 修正概念错误：`docker ps` 查的是容器不是镜像；`docker exec` 参数是容器名不是镜像名
+- 从 4 行扩充为分组速查：镜像操作 / 容器操作 / run 参数 / 日志文件状态 / 清理 / Compose / 常见易错点
+- 补登 index.md：新增"学习整理"分组，收录 docker.md
+- 注：wiki/学习整理/git.md 也未登记 index、SGlang.md 为空文件（本次未动，待确认）
+
+## [2026-08-10] ingest | LLM 推理压测：bench serve 与 throughput 参数详解
+- 来源：SGLang 与 vLLM main 分支源码（bench_serving / bench_offline_throughput / vllm bench serve / vllm bench throughput）
+- 新建独立文章：跨 SGLang+vLLM 两框架的参数对照学习资料，含 serve/throughput 区别、延迟指标（TTFT/TPOT/ITL/E2EL/goodput）、四命令速查表、示例与避坑
+- 记录版本差异：SGLang 老命令路径已改为弃用 shim（实现移至 sglang.benchmark.*）；vLLM 已统一为 `vllm bench` 子命令
+- 补登 index.md 学习整理分组
+
+## [2026-08-10] lint | 补登 git.md 到 index
+- wiki/学习整理/git.md 已存在但未在 index 登记 → 补条目（内容未改动）
+- 剩余：SGlang.md 仍为空文件，待用户确认写入或删除
