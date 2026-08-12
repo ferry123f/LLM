@@ -141,6 +141,29 @@
       "contentDigest": "b03f38f260c9190224b5f5c2ff27d2f41a7ca7215b4c1d8e04a68a5dc9890b6b",
       "providerUserMessageId": "8569c57a-8d8f-4669-8c19-76c39c418901",
       "providerAssistantMessageId": "d9cb5ac2-0a08-4379-b9dc-633cb20392d1"
+    },
+    {
+      "schemaVersion": 1,
+      "id": "msg-1786414593514-uf58dnn",
+      "userTurnOrdinal": 11,
+      "state": "accepted",
+      "localMessageId": "msg-1786414593484-xpxcf6o",
+      "timestamp": 1786414593484,
+      "rawDisplayText": "关于deepseek中的csa和hca给我一个能放进ppt中配他们各自图的文案",
+      "canonicalText": "关于deepseek中的csa和hca给我一个能放进ppt中配他们各自图的文案",
+      "context": {
+        "editorSelection": {
+          "notePath": "wiki/deepseek/DeepSeek-V4 架构与百万上下文效率.md",
+          "mode": "selection",
+          "selectedText": "Token-Level Compressor 把每 *m* 个 KV 压成 1 条 → Lightning Indexer（自己也有一路压缩 + Multi-Query Attenti",
+          "lineCount": 1,
+          "startLine": 49
+        }
+      },
+      "images": [],
+      "contentDigest": "b51b326ccc7d9702c9dc438e16091c10df9aa402cf28e7223ee9c8412bd5e605",
+      "providerUserMessageId": "3cbda262-03e6-4c4f-821d-0b00f7de922e",
+      "providerAssistantMessageId": "8a53539e-4877-43d3-809f-d0a16623b267"
     }
   ]
 }

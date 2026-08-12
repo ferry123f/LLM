@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "wiki/学习整理/SGlang.md",
+                "file": "wiki/学习整理/git.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "SGlang"
+              "title": "git"
             }
           }
         ]
@@ -201,9 +201,13 @@
   },
   "active": "b820128e9ad19bec",
   "lastOpenFiles": [
-    "assets/Pasted image 20260806170532.png",
     "wiki/学习整理/SGlang.md",
+    "CLAUDE.md",
     "wiki/学习整理/LLM推理压测-bench serve 与 throughput 参数详解.md",
+    "wiki/deepseek/DeepSeek-V4 架构与百万上下文效率.md",
+    "wiki/deepseek/DeepSeek-V3 架构与低成本高效训练.md",
+    "raw/deepseek/deepseek v3.pdf",
+    "assets/Pasted image 20260806170532.png",
     "wiki/学习整理/git.md",
     "wiki/学习整理/docker.md",
     "wiki/index.md",
@@ -214,13 +218,9 @@
     "wiki/log.md.tmp.14096.e1da2f8975e7",
     "wiki/index.md.tmp.14096.1ac17bf2a8d5",
     "wiki/学习整理/docker.md.tmp.14096.0d52757b138f",
-    "CLAUDE.md",
-    "wiki/deepseek/DeepSeek-V3 架构与低成本高效训练.md",
     "wiki/学习整理",
-    "wiki/deepseek/DeepSeek-V4 架构与百万上下文效率.md",
     "wiki/log.md",
     "raw/deepseek/HC.pdf",
-    "raw/deepseek/deepseek v3.pdf",
     "wiki/log.md.tmp.17712.b97c0c823b67",
     "assets/deepseek-v3-arch-mla-moe.png",
     "assets/deepseek-v3-fp8-framework.png",
