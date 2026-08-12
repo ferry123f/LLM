@@ -4,8 +4,8 @@
   "title": "加到wiki",
   "titleGenerationStatus": "failed",
   "createdAt": 1785837177952,
-  "updatedAt": 1786414681021,
-  "lastResponseAt": 1786414681021,
+  "updatedAt": 1786527813826,
+  "lastResponseAt": 1786527813826,
   "sessionId": "530eaac5-ad2b-4313-aa4b-d9546878cff4",
   "selectedModel": "opus",
   "providerState": {
@@ -13,11 +13,11 @@
   },
   "usage": {
     "model": "opus",
-    "inputTokens": 293,
-    "cacheCreationInputTokens": 165725,
+    "inputTokens": 10,
+    "cacheCreationInputTokens": 0,
     "cacheReadInputTokens": 0,
     "contextWindow": 1000000,
-    "contextTokens": 166018,
-    "percentage": 17
+    "contextTokens": 10,
+    "percentage": 0
   }
 }

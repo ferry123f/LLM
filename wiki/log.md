@@ -43,3 +43,41 @@
 ## [2026-08-10] lint | 补登 git.md 到 index
 - wiki/学习整理/git.md 已存在但未在 index 登记 → 补条目（内容未改动）
 - 剩余：SGlang.md 仍为空文件，待用户确认写入或删除
+
+## [2026-08-12] lint | 6 issues found, 3 auto-fixed
+- 自动修：index.md 两条 DeepSeek 死链（链接缺 `deepseek/` 子目录前缀，指向 wiki 根不存在的文件）→ 修正为 deepseek/DeepSeek-V3、deepseek/DeepSeek-V4
+- 自动修：SGlang.md 已有内容（不再是空文件）但未登记 index → 补登「学习整理」分组
+- 报告（未自动改）：SGlang.md 系用户手写半成品（无标题/frontmatter，有笔误 recv/processs/行号 L4574r），建议完善或授权 AI 整理成规范文章
+- 报告：raw/deepseek/HC.pdf 未被任何 wiki 文章消化，也未在 Sources 引用（疑似 mHC/超连接原始来源）→ 可 ingest 或在 V4 mHC 章节补引
+- 报告：benchmark 文章链向 [[SGlang]]，但 SGlang.md 无回链 See Also（可选补充双向交叉引用）
+
+## [2026-08-12] edit | SGLang 架构与调度循环源码走读（半成品 → 规范文章）
+- 把用户手写走读笔记整理成规范文章：分层架构 / 三进程模型 / 事件循环五步 / 组批优先级策略 / 采样算法 / grammar / eager-CUDA Graph / RadixCache / 注意力 backend 选型 / 两种 loop 对比，加 2 张 Mermaid 图
+- 整理期间用户又扩充了笔记（新增优先级调度、run_batch 三步、采样算法、backend 表等）→ 一并结构化纳入
+- 修正笔误：rece_requests→recv_requests、processs_input_requests→process_input_requests、handle_generate_reques→request、events_loop→event_loop；淡化不确定行号 L4574r
+- 补 See Also 双向回链 benchmark 文章（解决本日 lint 报告的无回链项）
+- 加版本免责声明 + 架构图溯源（Awesome-ML-SYS-Tutorial）；raw 未涉及
+- 更新 index.md 摘要（去掉「半成品待完善」标注）
+
+## [2026-08-12] ingest | Hyper-Connections（超连接）
+- Source: raw/deepseek/HC.pdf（Zhu et al., ByteDance Seed, ICLR 2025, arXiv:2409.19606v3）
+- 新建独立文章 wiki/deepseek/Hyper-Connections 超连接.md：全新通用概念（残差连接的替代），按概念命名而非 raw 文件名
+- 抽取论文 Figure 2（残差 / HC / 深度连接 / 宽度连接 对比示意）→ assets/hc-connections.png
+- 级联更新：DeepSeek-V4 mHC 章节补 HC 溯源引用与交叉链接；V4 Updated 2026-08-06 → 2026-08-12
+- 补登 index.md（DeepSeek 分组）
+- raw 未改动，仅渲染读取；已清理临时提取文件（_tmp_hc_text.txt / _probe_hc_p2.png）
+
+## [2026-08-12] normalize | Git 常用命令
+- 规范化 wiki/学习整理/git.md：裸文本流水账 → 加 # 标题 + > 一句话摘要
+- 排版重构：按「首次配置 / 初始化提交 / 关联远程 / 日常上传 / 流程速记」分节，命令全部包进 ```bash 代码块（行内 # 注释对齐）
+- 补 #git 标签；补 See Also 双链 [[docker]]（同属命令速查系列）
+- 事实未改动，仅排版与结构规范化
+- 首次由 normalize-note skill 执行
+
+## [2026-08-12] normalize | Git 常用命令（内容补全，第二轮）
+- 按 skill 新取向（内容优先）二次加工：原笔记只是「最小上手路径」，补齐新手日常必撞的高频缺口
+- 补充章节：查看状态与历史（log/diff）、撤销与回退（restore/reset/amend）、分支操作（switch/merge）、.gitignore 用法、pull --rebase 冲突处理
+- 补充说明：GitHub 已不支持密码推送需用 PAT/SSH（依据：GitHub 2021 起停用密码认证）；restore 为 Git 2.23+ 命令，老命令 checkout -- 仍等价可用
+- 安全标注：git reset --hard 标 ⚠️ 不可恢复慎用；.gitignore 只对未跟踪文件生效需 rm --cached
+- 依据：Git 官方文档 + 通用常识；未改动用户原有命令与流程结论
+- 更新 index.md 摘要

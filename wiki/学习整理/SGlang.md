@@ -1,15 +1,184 @@
-分层理解： 服务层 调度层 模型层
+# SGLang 架构与调度循环源码走读
+
+> 一句话：SGLang 推理引擎用**三进程分工**（Tokenizer / Scheduler / Detokenizer）+ **三层设计**（服务层 / 调度层 / 模型层）把 CPU 与 GPU 的活儿拆开；真正的引擎心跳是 Scheduler 进程里那个 `while True` 事件循环——**收请求 → 分发 → 组批 → 跑模型 → 处理结果**，循环不息。
+
+## 一、分层架构
+
+| 层 | 职责 | 关键组件 |
+|---|---|---|
+| **服务层** | 对外 HTTP / OpenAI 兼容 API，收请求、tokenize、返回响应 | HTTP Server + TokenizerManager |
+| **调度层** | 引擎大脑：请求排队、连续组批（continuous batching）、KV 缓存管理、驱动前向 | Scheduler |
+| **模型层** | 在 GPU 上实际跑前向（prefill / decode） | ModelWorker → ModelRunner |
+
+架构图（引自 Awesome-ML-SYS-Tutorial 的 SGLang code-walk-through）：
+
 ![sglang-architecture.svg|700](https://raw.githubusercontent.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/0a0ba58aae3eccded83c77967f0b1185a018acd7/sglang/code-walk-through/sglang-architecture.svg)
-主进程：HTTP服务+tokenizer
-子进程：scheduler
-子进程：detokenizer
-scheduler.py:
-由run_scheduler_process L4574r启动 调用 run_event_loop， 有两种模式：
-events_loop_normal和events_loop_overlap，下面以前者为例
-由一个主循环组成：
-while true：
-	rece_requests:从两个 ZMQ 通道（用户 + RPC）一次性把当前所有能读到的消息拉出来（_pull_raw_reqs()非阻塞），做多 rank 广播（_broadcast_reqs_across_ranks）和解包，返回一个 list。
-	processs_input_requests:
-	get_next_batch_to_run:
-	result = self.run_batch(batch):
-	self.process_batch_result(batch, result):大体可以分为process_batch_result_decode和process_batch_result_prefill，前者是把 decode 出来的新 token 归位到每个用户，结束的用户释放 KV；后者是记第 1 个 token； 核心是把 KV 写进 RadixCache ，两者都会调用output_streamer.stream_output把处理后的结果发送给另一个进程Detokenizer
+
+## 二、三进程模型
+
+SGLang 把流水线拆成**三个进程**，用 **ZMQ** 消息通道通信。这样 CPU 侧（tokenize / detokenize）和 GPU 侧（模型前向）能并行，不被 Python GIL 互相拖累：
+
+| 进程 | 职责 |
+|---|---|
+| **主进程** | HTTP 服务 + **TokenizerManager**：把文本 tokenize 成 `input_ids` |
+| **Scheduler 子进程** | **调度大脑**：组批、管 KV 缓存、驱动模型前向 |
+| **Detokenizer 子进程** | 把输出 token 解码回文本，**流式**回传 |
+
+```mermaid
+flowchart LR
+    U([用户 HTTP 请求]) --> H[HTTP Server]
+    H --> TK["TokenizerManager<br/>文本 → input_ids"]
+    TK -->|ZMQ| EL["Scheduler 事件循环"]
+    EL -->|ZMQ 输出 token| DK["Detokenizer<br/>token → 文本"]
+    DK -->|流式返回| U
+```
+
+## 三、Scheduler 事件循环（核心）
+
+进程入口 `run_scheduler_process` 启动 Scheduler 后调用 `run_event_loop`，有两种模式：
+
+- **`event_loop_normal`**：串行——收 → 分发 → 组批 → 跑 → 处理结果，一步接一步，简单易读。
+- **`event_loop_overlap`**：重叠——上一批还在 GPU 上跑时，CPU 已经在准备下一批，把调度开销藏进计算里，吞吐更高（生产常用）。
+
+下面以 `event_loop_normal` 为例，主循环 `while True` 的五步：
+
+```mermaid
+flowchart TB
+    A["① recv_requests<br/>非阻塞收 + 多 rank 广播"] --> B["② process_input_requests<br/>请求分发 / 入队"]
+    B --> C["③ get_next_batch_to_run<br/>组批 + 优先级调度"]
+    C --> D["④ run_batch<br/>GPU forward + 采样"]
+    D --> E{"⑤ process_batch_result"}
+    E -->|prefill| F["记第 1 个 token<br/>KV 写入 RadixCache"]
+    E -->|decode| G["新 token 归位到各请求<br/>完成的请求释放 KV"]
+    F --> S["stream_output → Detokenizer"]
+    G --> S
+    S --> A
+```
+
+### ① `recv_requests` —— 收
+从两个 ZMQ 通道（用户请求 + RPC 控制）**非阻塞**地一次性拉走当前所有能读到的消息；多 GPU（TP/DP）下把请求**广播到各 rank**，解包成请求列表返回。
+
+### ② `process_input_requests` —— 分发
+遍历上一步的请求，分门别类处理；最常见的是生成请求，交给 `handle_generate_request` 入等待队列。
+
+### ③ `get_next_batch_to_run` —— 组批（排班总入口）
+每轮循环调用一次，决定「下一步 GPU 要跑什么」。
+
+- **输入**：运行中队列 `running_batch`（老客人池）+ 上轮成品 `last_batch`
+- **输出**：这一轮要跑的 `batch_to_run` + 更新后的 `last_batch`
+- **prefill 优先**：先看有没有新请求要 prefill，经 `get_new_batch_prefill` → `get_new_batch_prefill_raw` 组出 prefill 批；没有才继续跑 decode。
+
+**等待队列的优先级调度策略**（决定谁先被 prefill）：
+
+| 策略 | 含义 |
+|---|---|
+| **FCFS** | 先来先服务（默认） |
+| **LPM** | 最长前缀命中优先——最大化 RadixCache 复用 |
+| **DFS-Weights** | 按 radix tree 深度优先加权遍历排序 |
+| **LOF** | 声明输出最长优先，按请求的 `max_new_tokens` 从大到小 |
+| **Random** | 随机 |
+| **Routing-Key** | 按路由键亲和性排序 |
+
+### ④ `run_batch` —— 跑批（GPU forward + 采样）
+把这一轮的 `ScheduleBatch` 交给 **ModelWorker → ModelRunner**，在 GPU 上跑一次 forward 并采样。核心三步：
+
+1. **`resolve_forward_inputs`** —— 把上轮的 **future 引用**换成真实 tensor
+2. **`forward_batch_generation`** —— 真正跑 GPU forward + 采样
+   调用链：`TpModelWorker.forward_batch_generation → model_runner.forward → _forward_raw`，输出 `GenerationBatchResult`
+3. **`_relay_forward_payload`** —— 把本轮结果挂进 `future_map` 供下轮取用
+
+> **future 机制**：③④⑤ 靠 future 解耦——结果先挂成 `future_map`，下轮 `resolve_forward_inputs` 再兑现成真实 tensor。这正是 `overlap` 模式能让 CPU 调度不干等 GPU 的关键。
+
+**采样**：LLM 一次 forward 输出的**不是 token，而是一个概率分布**；采样就是从分布里挑一个 token 当下一个词：
+
+| 采样算法 | 做法 |
+|---|---|
+| **Greedy** | 直接取概率最大的 token |
+| **Temperature** | 用温度把概率分布平滑 / 锐化后再采 |
+| **Top-K** | 只在概率前 K 大的 token 里采样 |
+| **Top-P（核采样）** | 只在累计概率达到 P 的最小 token 集里采样 |
+| **Beam Search** | 同时保留多条候选路径 |
+
+**约束采样（grammar）**：采样前把「不符合语法的 token」概率强行压成 0，保证输出合法。典型类型：正则、JSON schema、EBNF 语法、choice（枚举选项）。
+
+**执行模式**：
+
+| 模式 | 特点 |
+|---|---|
+| **eager** | 每行 Python 立即在 GPU 上执行一个 kernel，灵活但有 Python 开销 |
+| **CUDA Graph** | 先把整个流程捕获成一张图，之后重放整张图、跳过 Python，延迟更低 |
+
+**overlap 的实现**：`event_loop_overlap` 下用三个 CUDA stream（`schedule` / `forward` / `copy`）让三阶段流水并行。
+
+### ⑤ `process_batch_result` —— 处理结果
+分两条路收尾：
+
+- **prefill**（`process_batch_result_prefill`）：记下每个请求的**第 1 个输出 token**，把算好的 KV **写进 RadixCache**。
+- **decode**（`process_batch_result_decode`）：把新 token **归位**到对应请求；已完成（EOS / 达长度）的请求**释放 KV**。
+- 两条路最后都调用 **`output_streamer.stream_output`**，把结果经 ZMQ 发给 **Detokenizer 进程**。
+
+**记忆口诀：收（recv）→ 分（process input）→ 组（get batch）→ 跑（run）→ 收尾（process result）。**
+
+## 四、关键数据结构：RadixCache
+
+SGLang 的招牌是 **RadixAttention**——用**基数树（radix tree）**组织 KV 缓存，自动复用请求间的**公共前缀**（相同 system prompt、few-shot 示例等）。prefill 后把 KV 写进 RadixCache，后续请求命中相同前缀即**直接复用、跳过重复 prefill**。上面 ③ 的 **LPM / DFS-Weights** 调度策略，正是为了最大化这棵树的命中率。
+
+> 这也是压测时「前缀缓存会虚高吞吐」的根源——见 [[LLM推理压测-bench serve 与 throughput 参数详解]] 的避坑章节。
+
+## 五、注意力 Backend 选型
+
+`run_batch` 里 GPU forward 用哪套注意力 kernel，由 `--attention-backend` 决定：
+AttentionBackend是基类，所有 backend 都实现同一套接口
+
+| Backend | 适用场景 | 特点 |
+|---|---|---|
+| **flashinfer** | NVIDIA GPU（默认首选） | 专为推理优化，PagedKV 原生支持，最快 |
+| **triton** | NVIDIA / AMD GPU | Triton DSL 写的通用 kernel，无 CUDA 依赖 |
+| **torch_native** | CPU / 兼容性场景 | 纯 PyTorch，最慢但最通用 |
+| **flashmla** | Hopper（H100/H200） | 针对 MLA（DeepSeek）优化 |
+| **fa3** | H100 | FlashAttention v3 |
+| **cutlass_mla** | 特定场景 | MLA 的 CUTLASS 实现 |
+| **aiter** | AMD ROCm | AMD 专用 |
+| **ascend** | Ascend NPU | 华为昇腾芯片 |
+
+## 六、两种事件循环对比
+
+| | `event_loop_normal` | `event_loop_overlap` |
+|---|---|---|
+| CPU 调度 vs GPU 计算 | 串行 | 重叠（三 CUDA stream） |
+| 吞吐 | 基准 | 更高 |
+| 复杂度 | 简单、适合读源码入门 | 高（要处理 future 依赖） |
+
+读源码建议：先用 `normal` 理清主干，再看 `overlap` 如何用 future + 多 stream 把流水线气泡填满。
+
+
+
+## See Also
+
+- [[LLM推理压测-bench serve 与 throughput 参数详解]] — 压测 SGLang 服务的参数详解；本文的 RadixCache 前缀复用正是那里「前缀缓存作弊」的机制来源。
+
+## 备注
+
+- 本文基于对 SGLang 的源码走读笔记整理，聚焦主干流程；**具体函数名 / 行号可能随 SGLang 版本变化，以实际代码为准**。
+- 架构图引自 [Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) 的 SGLang code-walk-through。
+Detokenilzer：
+event_loop主循环：
+recv_obj = sock_recv(self.recv_from_scheduler) ：接受scheduler发送的消息
+output = self._request_dispatcher(recv_obj)：分发消息
+	一般情况都是分发到handle_batch_token_id_out，调用_decode_batch_token_id_output
+		Decodestatus是每个请求的翻译状态
+		surr_offset : 上下文起点 —— 从这里开始给 tokenizer 提供上下文（保证 BPE 边界正确）
+		read_offset : 读取终点 —— 到这里为止的 token 才被"确认可读"
+		上下文段: decode_ids[surr_offset:read_offset] （用来解出 surr_texts ）
+		全量段: decode_ids[surr_offset:] （用来解出 read_texts ）
+		增量 = read_texts - surr_texts
+		decoded_text_len : 已经"确认提交"的完整文本长度
+		sent_offset : 已经发给用户的字节位置（可能包含半字符时的"临时可打印前缀"）
+		pending = sent_offset - decoded_text_len : 上轮临时输出了但没提交的字节数，本轮要跳过避免重复
+		难点一：增量翻译 上下文段和全量段解码后相减得到增量 不然会乱码
+		难点二： UTF-8 边界问题 （半个字符的处理）- 如果新翻译出来的文本 结尾没有 � → 干净，直接推出去 + 提交状态。 如果 结尾有 � → 说明 最后有半个字符 没解全，只推 前面完整可打印的部分 ， 不推进 offset 。下一轮 token 到齐后再重新解码，那时半字符会补全。
+		难点三：批量翻译_grouped_batch_decode：
+		trim_matched_stop:请求结束时（碰到 </s> / stop=["\n\n"] / max_new_tokens），需要把 停止符本身 从输出里裁掉，不然用户会看到"结果 + </s> "这种脏尾巴。
+sock_send(self.send_to_tokenizer, output)：发送消息给tokenizer 它通过SSE推给用户
+	Server-Sent Events(SSE)服务器推送事件，一种HTTP之上的单向流式协议
+	技术 方向 场景 普通 HTTP 客户端 → 服务端一问一答，一次完整响应 REST API SSE 服务端 → 客户端 单向流式推送 ，长连接 LLM 流式输出 、股票行情、通知 WebSocket 双向长连接 聊天室、协作编辑 HTTP chunked 一段一段发响应体 SSE 的底层就用这个
