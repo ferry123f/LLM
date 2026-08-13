@@ -81,6 +81,12 @@ AI 知识管理员的工作手册。把这个文件放在你的 Obsidian vault �
 
 **动作：** 调用 skill [`normalize-note`](.claude/skills/normalize-note/SKILL.md)。以**内容为主**——像处理 SGLang 那次一样灵活加工：补全缺失细节、纠正笔误与事实错误、结构化梳理；**格式为辅**——排版润色、补双链标签。**就地重写**原文件，级联更新 index.md 与 log.md。安全底线：raw 只读、改动透明不臆造、存疑标注交用户定夺。详见 skill 文件。
 
+### 触发 5：Daily Report（学习日报）
+
+**触发词：** "写日报"、"今天的日报"、"生成日报"、"日报"。
+
+**动作：** 调用 skill [`daily-report`](.claude/skills/daily-report/SKILL.md)。用 `git diff` 扫出当天 `wiki/` 下的笔记改动，压缩成 3–5 句的中文流水账日报，**只在对话里输出，不写任何文件**（不建日报文件、不动 index.md 与 log.md）。核心要求是**深度如实**：「知道名字」不能写成「研究了」，笔记里没有的不许加；拿不准就按轻的写并追问。详见 skill 文件。
+
 ## 约定
 
 - 所有 wiki 内部链接用**相对当前文件的路径**。
