@@ -1,4 +1,5 @@
 .claudian/
-.claude/
+.claude/*
+!.claude/skills/
 .obsidian/workspace.json
 .obsidian/workspace-*.json
