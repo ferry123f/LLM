@@ -137,7 +137,7 @@ radix tree的增删改查
 	 RadixCache.total_size：树里所有 token 总数
 Token-to-page映射：
 1. 请求 → token 序列 → KV 槽位号 （ req_to_token_pool ）
-	1. 
+	1.  由 ReqToTokenPool.req_to_token 这张大表提供 
 2. KV 槽位号 → 实际 GPU 显存位置 （ token_to_kv_pool + allocator）
 
 > 这也是压测时「前缀缓存会虚高吞吐」的根源——见 [[LLM推理压测-bench serve 与 throughput 参数详解]] 的避坑章节。
