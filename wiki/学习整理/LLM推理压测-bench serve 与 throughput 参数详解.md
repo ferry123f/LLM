@@ -268,3 +268,31 @@ vllm bench throughput --model meta-llama/Llama-3.1-8B-Instruct \
 
 - [[SGlang]] — SGLang 使用笔记
 - [[LLM推理的GPU硬件基础]] — 压测数字背后的硬件解释：TTFT 反映 prefill（compute-bound），TPOT/ITL 反映 decode（memory-bound）；单流 decode 速度上限 = 带宽 ÷ 权重字节，可用来判断实测有没有跑到硬件天花板。
+Vllm
+root@3dd8d07a7ec5:/vllm-workspace# vllm bench serve \    --host 127.0.0.1 --port 8000 \
+
+  --model Qwen3-0.6B \   --tokenizer /home/models/Qwen3-0.6B \ --dataset-name random \
+
+  --random-input-len 1024 \   --random-output-len 128 \   --num-prompts 200 \
+
+  --ignore-eos
+  ![[Pasted image 20260813163349.png]]
+  ![[Pasted image 20260813163354.png]]
+  Vllm
+  root@3dd8d07a7ec5:/vllm-workspace# CUDA_VISIBLE_DEVICES=2 vllm bench throughput \
+
+  --model /home/models/Qwen3-0.6B \   --dataset-name random \
+
+  --input-len 1024 --output-len 128 \   --num-prompts 200
+  CUDA_VISIBLE_DEVICES=1 vllm bench throughput \  --model /home/models/Qwen3-0.6B \  --dataset-name sharegpt \  --dataset-path /vllm-workspace/ShareGPT_V3_unfiltered_cleaned_split.json \  --num-prompts 200
+  SGlang
+  root@e6adbbdf4cf8:/sgl-workspace/sglang# python3 -m sglang.bench_serving \   --backend sglang \
+
+  --host 127.0.0.1 --port 30000 \   --model /home/models/Qwen3-0.6B \   --dataset-name random-ids \
+
+  --random-input-len 1024 \   --random-output-len 128 \   --random-range-ratio 1 \   --num-prompts 200
+  ![[Pasted image 20260813163446.png]]
+  sglang
+  root@3dd8d07a7ec5:/vllm-workspace# CUDA_VISIBLE_DEVICES=<空卡号> python3 -m sglang.bench_offline_throughput \  --model-path /home/models/Qwen3-0.6B \  --dataset-name random \  --dataset-path /cjw/ShareGPT_V3_unfiltered_cleaned_split.json \  --random-input-len 1024 \  --random-output-len 128 \  --random-range-ratio 1 \  --num-prompts 200
+  下载一个600MB左右语料，"https://hf-mirror.com/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json"
+  ![[Pasted image 20260813163510.png]]
