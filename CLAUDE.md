@@ -6,7 +6,15 @@ AI 知识管理员的工作手册。把这个文件放在你的 Obsidian vault �
 
 - **raw/** — 原始素材，**不可变**。AI 只读，永不修改。按主题分子目录，允许多级嵌套。PDF/视频/xlsx/图片保持原文件名。
 - **wiki/** — AI 维护的消化笔记。允许多级子目录。每篇文章 md 格式，命名自由（描述性即可）。
-- **assets/** — 配图资源。
+- **assets/** — 配图资源，**按 wiki 主题分子目录**（`assets/deepseek/`、`assets/学习整理/` …，与 `wiki/` 的顶层主题一一对应）。详见下节。
+
+## assets 规矩
+
+1. **落点镜像 wiki 主题**：图放进 `assets/<该图所属笔记的 wiki 顶层主题>/`。主题不存在就新建，与 `wiki/` 保持同名。
+2. **文件名必须全局唯一且描述性**：`<主题>-<对象>-<内容>.png`，全小写连字符，如 `deepseek-v4-mhc.png`、`bench-sglang-offline.png`。**唯一性是硬要求**——Obsidian 短链 `![[x.png]]` 靠文件名全库检索，重名会产生歧义。
+3. **引用一律用短链** `![[文件名.png]]`，**不写 `assets/` 路径**。这样以后挪目录不会断链（Obsidian `newLinkFormat` 已设为 `shortest`）。
+4. **`assets/_inbox/` 是暂存区**，不是归宿。Obsidian 粘贴的图会自动落这里（带 `Pasted image <时间戳>` 这类无意义名）。AI 每次 ingest / normalize 时**必须顺手清空 `_inbox`**：读图辨认内容 → 按规则 2 改描述性名 → `git mv` 进对应主题目录 → 更新引用它的笔记。
+5. **改名要连引用一起改**：`git mv` 之后必须 grep 全库把旧文件名的引用换掉，不能只搬文件。
 
 ## 两个特殊文件（必须维护）
 

@@ -126,3 +126,19 @@
 - 补 See Also：把 [[SGlang]] 的描述从「SGLang 使用笔记」改为指明 §7.3 ④⑤⑥ 三条分析在那篇的机制出处
 - raw 未涉及（本次素材为用户实操产出，非 raw 素材）
 - 更新 index.md 摘要与 Updated 日期 2026-08-10 → 2026-08-13
+
+## [2026-08-13] refactor | assets/ 重排为主题子目录 + 止住粘贴图乱落的根因
+- 起因：用户指出 assets/ 12 张图平铺、还混着未改名的 `Pasted image 20260806170532.png`，「后面东西会越来越多，不能直接这么就扔进去」
+- **根因定位**：`.obsidian/app.json` 未设 `attachmentFolderPath` → Obsidian 粘贴图默认落 **vault 根目录**、名字带时间戳。不改设置则每次都得手动搬，治标不治本
+- **前置核查**：grep 全库 11 处图片嵌入**全是纯文件名短链**（不带 `assets/` 路径）→ Obsidian 靠文件名全库检索，移进子目录**不会断链**（前提是文件名全局唯一）
+- **目录重排**（方案：镜像 wiki 主题分子目录）：
+  - `assets/deepseek/` ← deepseek-v3-arch-mla-moe / -fp8-framework / -mtp、deepseek-v4-overall-arch / -csa / -hca、hc-connections（7 张）
+  - `assets/学习整理/` ← bench-vllm-serve-run1 / -run2、bench-sglang-serve / -offline（4 张）
+  - `assets/_inbox/` 新建暂存区（`.gitkeep` 占位）
+  - 全部用 `git mv`，保留文件历史
+- **改名遗留图**：`Pasted image 20260806170532.png` → `assets/deepseek/deepseek-v4-mhc.png`。读图确认内容为三联对比（a) 标准残差 / (b) HC / (c) mHC），故按 mHC 命名，与同目录 deepseek-v4-* 系列对齐
+- 同步修 V4 笔记 L79 唯一引用：换新文件名，补前后空行（原图挤在列表与公式之间无空行），并按本文既有图注体例补一句三代残差演进的说明
+- **改设置（治本）**：`.obsidian/app.json` 加 `attachmentFolderPath: "assets/_inbox"`（粘贴图落暂存区，不再污染 vault 根）+ `newLinkFormat: "shortest"`（锁死短链生成，保证以后挪目录仍不断链）
+  - ⚠️ 该文件在 `.gitignore:8`，属机器专属配置**不随 git 同步**，另一台电脑需手动设一次：设置 → 文件与链接 → 新附件的默认位置 → 「在以下文件夹中」→ `assets/_inbox`
+- **固化约定**：CLAUDE.md 新增「assets 规矩」5 条（落点镜像主题 / 文件名全局唯一且描述性 / 引用一律短链不写路径 / _inbox 是暂存区且每次 ingest-normalize 必须清空 / 改名必须连引用一起改），让后续录入自动遵守，不再靠临时判断
+- raw 未涉及
