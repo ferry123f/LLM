@@ -126,8 +126,16 @@ radix tree的增删改查
 增： RadixCache.insert调用RadixCache._insert_helper
 	RadixCache.cache_unfinished_req：请求 prefill 完/decode 中的便捷入口
 	RadixCache.cache_finished_req：请求完成时的便捷入口
-删： RadixCache.evict按策略驱逐叶子释放显存，策略默认 LRU（ last_access_time 最老的先删）；也支持 LFU / priority-based。
-	 RadixCache._delete_leaf：
+删： RadixCache.evict按策略驱逐叶子释放显存，策略默认 LRU（ last_access_time 最老的先删）；也支持 LFU（根据命中次数，复用率低的先删） / priority-based（综合方法）。
+	 RadixCache._delete_leaf：从树里摘掉叶子节点
+		 RadixCache.reset：清空这个树
+改： RadixCache._split_node：节点分裂（部分匹配时）
+	 RadixCache.inc_lock_ref：一个请求开始用某前缀-》从叶子往上lock_ref++
+	 RadixCache.dec_lock_ref：请求结束后-》从叶子往上一路lock_ref--
+查：  RadixCache.match_prefix：查找最长前缀：给一段token序列，返回“树里有多少前缀已经缓存了”以及对应的KV索引。核心调用RadixCache._match_prefix_helper，递归查找
+	 RadixKey.match：两段 token 的最长公共前缀算法（指数搜索+二分 O(log n)）
+	 RadixCache.total_size：树里所有 token 总数
+
 
 > 这也是压测时「前缀缓存会虚高吞吐」的根源——见 [[LLM推理压测-bench serve 与 throughput 参数详解]] 的避坑章节。
 
