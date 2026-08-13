@@ -85,7 +85,7 @@ AI 知识管理员的工作手册。把这个文件放在你的 Obsidian vault �
 
 **触发词：** "写日报"、"今天的日报"、"生成日报"、"日报"。
 
-**动作：** 调用 skill [`daily-report`](.claude/skills/daily-report/SKILL.md)。用 `git diff` 扫出当天 `wiki/` 下的笔记改动，压缩成 3–5 句的中文流水账日报，**只在对话里输出，不写任何文件**（不建日报文件、不动 index.md 与 log.md）。核心要求是**深度如实**：「知道名字」不能写成「研究了」，笔记里没有的不许加；拿不准就按轻的写并追问。详见 skill 文件。
+**动作：** 调用 skill [`daily-report`](.claude/skills/daily-report/SKILL.md)。先跑它自带的 [`scripts/collect_diff.sh`](.claude/skills/daily-report/scripts/collect_diff.sh) 确定性地扫出当天 `wiki/` 下的笔记改动（工作区 + 当天 commit，中文名不乱码，按文件分段），再压缩成 3–5 句的中文流水账日报，**只在对话里输出，不写任何文件**（不建日报文件、不动 index.md 与 log.md）。核心要求是**深度如实**：「知道名字」不能写成「研究了」，笔记里没有的不许加；拿不准就按轻的写并追问。详见 skill 文件。
 
 ## 约定
 

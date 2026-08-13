@@ -3,12 +3,19 @@
 #
 # 用法：  bash collect_diff.sh [vault根目录]
 # 默认  ： 当前工作目录
-# 环境变量：MAX_LINES  单个文件/提交最多输出多少行（默认 200，超出显式报告截断）
+# 环境变量：MAX_LINES  每个文件最多输出多少行（默认 120，超出显式报告截断行数）
+#                      写日报够用；觉得信息不足就调高重跑，例如 MAX_LINES=400
 #
-# 处理三种情况（这正是要固化的判断，不留给模型现推）：
+# 处理三种情况：
 #   1. 未提交的改动（工作区 + 暂存区 + 未跟踪的新笔记）
-#   2. 当天已提交的改动（--since=midnight）
+#   2. 当天已提交的改动（--since=midnight），逐 commit 分段
 #   3. 两者都有 —— 合并输出，分区标注
+#
+# 两个已踩过的坑，别改回去：
+#   * core.quotePath=false —— 否则中文文件名被转义成 \345\255\246 这种八进制
+#   * 每个来源只调一次 git，用 awk 切分 —— 这个 vault 有定时自动 commit
+#     （"vault backup: <时间戳>"），先 --name-only 再逐文件 diff 会撞上竞态：
+#     列表拿到了，逐文件 diff 时改动已被自动提交走，结果全是空的。
 #
 # 退出码：
 #   0  有改动，已输出
@@ -18,10 +25,8 @@
 set -uo pipefail
 
 VAULT="${1:-$(pwd)}"
-MAX_LINES="${MAX_LINES:-200}"
+MAX_LINES="${MAX_LINES:-120}"
 
-# core.quotePath=false —— 否则中文文件名会被转义成 \345\255\246 这种八进制，
-# 拿去当路径参数再 diff 一次就取不到内容了。这个坑必须在脚本里堵死。
 git_q() { git -c core.quotePath=false -C "$VAULT" "$@"; }
 
 if ! git_q rev-parse --git-dir >/dev/null 2>&1; then
@@ -34,92 +39,97 @@ if [ ! -d "$VAULT/wiki" ]; then
   exit 2
 fi
 
-# 只保留 diff 的新增行，剥掉 +/+++ 前缀，去掉纯空行。
-# 这是给模型读的，不需要保留 diff 语法噪声。
-added_lines_only() {
-  grep '^+' | grep -v '^+++' | sed 's/^+//' | sed '/^[[:space:]]*$/d'
+# 把 unified diff 切成「文件 → 新增行」分段。
+# 只留新增行（+），剥前缀、去空行；每文件超过 MAX 行就截断并报告真实行数。
+SPLIT_AWK='
+function flush() {
+  if (file != "" && total > shown)
+    printf "…（该文件本次共新增 %d 行，已显示前 %d 行，剩余 %d 行未显示）\n", total, shown, total - shown
 }
+/^diff --git / {
+  flush()
+  # "a/PATH b/PATH" —— 两侧路径相同，按长度取中点，这样含空格的中文名也不会切错
+  s = substr($0, 12)
+  L = int((length(s) - 5) / 2)
+  file = substr(s, 3, L)
+  printf "\n--- 文件：%s ---\n", file
+  total = 0; shown = 0
+  next
+}
+/^new file mode/ { print "（★ 全新文件，以下即全文）"; next }
+/^\+\+\+ /       { next }
+/^\+/ {
+  line = substr($0, 2)
+  if (line ~ /^[[:space:]]*$/) next
+  total++
+  if (shown < MAX) { print line; shown++ }
+  next
+}
+END { flush() }
+'
 
-# 截断并显式告知 —— 静默截断会让日报误以为「就这么多」。
-cap() {
-  local label="$1"
-  local buf
-  buf=$(cat)
-  local n
-  n=$(printf '%s\n' "$buf" | wc -l | tr -d ' ')
-  if [ "$n" -gt "$MAX_LINES" ]; then
-    printf '%s\n' "$buf" | head -n "$MAX_LINES"
-    echo "…（$label 共 $n 行，已截断，剩余 $((n - MAX_LINES)) 行未显示）"
-  else
-    printf '%s\n' "$buf"
-  fi
-}
+split_diff() { awk -v MAX="$MAX_LINES" "$SPLIT_AWK"; }
 
 HAS_HEAD=0
 git_q rev-parse HEAD >/dev/null 2>&1 && HAS_HEAD=1
 
 # ---------- 1. 未提交的改动 ----------
+# 一次调用拿到完整 diff，不再逐文件复查
 if [ "$HAS_HEAD" = 1 ]; then
-  UNCOMMITTED=$(git_q diff HEAD --name-only -- wiki/ 2>/dev/null)
+  DIRTY_DIFF=$(git_q diff HEAD -- wiki/ 2>/dev/null)
 else
-  UNCOMMITTED=$(git_q diff --name-only -- wiki/ 2>/dev/null)
+  DIRTY_DIFF=$(git_q diff -- wiki/ 2>/dev/null)
 fi
 
-# 未跟踪的新笔记也要算 —— 新建的文章不在 diff 里
 UNTRACKED=$(git_q ls-files --others --exclude-standard -- wiki/ 2>/dev/null)
 
-if [ -n "$UNCOMMITTED" ] || [ -n "$UNTRACKED" ]; then
+if [ -n "$DIRTY_DIFF" ] || [ -n "$UNTRACKED" ]; then
   echo "=============================================="
-  echo "未提交的改动"
+  echo "未提交的改动（工作区）"
   echo "=============================================="
-  echo
 
-  if [ -n "$UNCOMMITTED" ]; then
-    while IFS= read -r f; do
-      [ -z "$f" ] && continue
-      echo "--- 文件：$f （已有文件，新增内容如下）---"
-      if [ "$HAS_HEAD" = 1 ]; then
-        git_q diff HEAD -- "$f" 2>/dev/null | added_lines_only | cap "$f"
-      else
-        git_q diff -- "$f" 2>/dev/null | added_lines_only | cap "$f"
-      fi
-      echo
-    done <<< "$UNCOMMITTED"
-  fi
+  [ -n "$DIRTY_DIFF" ] && printf '%s\n' "$DIRTY_DIFF" | split_diff
 
   if [ -n "$UNTRACKED" ]; then
     while IFS= read -r f; do
       [ -z "$f" ] && continue
-      echo "--- 文件：$f （★ 全新文件，全文如下）---"
-      sed '/^[[:space:]]*$/d' "$VAULT/$f" 2>/dev/null | cap "$f"
       echo
+      echo "--- 文件：$f ---"
+      echo "（★ 全新文件，尚未 git add，以下即全文）"
+      sed '/^[[:space:]]*$/d' "$VAULT/$f" 2>/dev/null \
+        | awk -v MAX="$MAX_LINES" '
+            { total++; if (shown < MAX) { print; shown++ } }
+            END { if (total > shown)
+                    printf "…（该文件共 %d 行，已显示前 %d 行，剩余 %d 行未显示）\n", total, shown, total - shown }'
     done <<< "$UNTRACKED"
   fi
+  echo
 fi
 
 # ---------- 2. 当天已提交的改动 ----------
 COMMITS=$(git_q log --since=midnight --format=%H -- wiki/ 2>/dev/null)
 
 if [ -n "$COMMITS" ]; then
+  N=$(printf '%s\n' "$COMMITS" | grep -c .)
   echo "=============================================="
-  echo "今天已提交的改动"
+  echo "今天已提交的改动（共 $N 个 commit，从新到旧）"
   echo "=============================================="
   echo
+  echo "注意：本 vault 有定时自动备份提交，同一篇笔记的内容常被拆散在多个"
+  echo "      commit 里。判断「学了什么」要把这些片段合起来看，不要按 commit 数量"
+  echo "      估工作量。"
 
   while IFS= read -r c; do
     [ -z "$c" ] && continue
-    SUBJECT=$(git_q log -1 --format='%h %s' "$c")
-    echo "--- commit: $SUBJECT ---"
-    echo "改动文件："
-    git_q show "$c" --format= --name-only -- wiki/ 2>/dev/null | sed 's/^/  /'
-    echo "新增内容："
-    git_q show "$c" --format= -- wiki/ 2>/dev/null | added_lines_only | cap "commit $SUBJECT"
     echo
+    echo "########## commit $(git_q log -1 --format='%h %ad %s' --date=format:'%H:%M' "$c") ##########"
+    git_q show "$c" --format= -- wiki/ 2>/dev/null | split_diff
   done <<< "$COMMITS"
+  echo
 fi
 
 # ---------- 收尾 ----------
-if [ -z "$UNCOMMITTED" ] && [ -z "$UNTRACKED" ] && [ -z "$COMMITS" ]; then
+if [ -z "$DIRTY_DIFF" ] && [ -z "$UNTRACKED" ] && [ -z "$COMMITS" ]; then
   echo "NO_CHANGES: 今天 wiki/ 下没有检测到改动"
   exit 1
 fi
