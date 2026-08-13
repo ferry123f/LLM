@@ -135,7 +135,10 @@ radix tree的增删改查
 查：  RadixCache.match_prefix：查找最长前缀：给一段token序列，返回“树里有多少前缀已经缓存了”以及对应的KV索引。核心调用RadixCache._match_prefix_helper，递归查找
 	 RadixKey.match：两段 token 的最长公共前缀算法（指数搜索+二分 O(log n)）
 	 RadixCache.total_size：树里所有 token 总数
-
+Token-to-page映射：
+1. 请求 → token 序列 → KV 槽位号 （ req_to_token_pool ）
+	1. 
+2. KV 槽位号 → 实际 GPU 显存位置 （ token_to_kv_pool + allocator）
 
 > 这也是压测时「前缀缓存会虚高吞吐」的根源——见 [[LLM推理压测-bench serve 与 throughput 参数详解]] 的避坑章节。
 
