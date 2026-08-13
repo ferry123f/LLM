@@ -93,7 +93,15 @@ AI 知识管理员的工作手册。把这个文件放在你的 Obsidian vault �
 
 **触发词：** "写日报"、"今天的日报"、"生成日报"、"日报"。
 
-**动作：** 调用 skill [`daily-report`](.claude/skills/daily-report/SKILL.md)。先跑它自带的 [`scripts/collect_diff.sh`](.claude/skills/daily-report/scripts/collect_diff.sh) 确定性地扫出当天 `wiki/` 下的笔记改动（工作区 + 当天 commit，中文名不乱码，按文件分段），再压缩成 3–5 句的中文流水账日报，**只在对话里输出，不写任何文件**（不建日报文件、不动 index.md 与 log.md）。核心要求是**深度如实**：「知道名字」不能写成「研究了」，笔记里没有的不许加；拿不准就按轻的写并追问。详见 skill 文件。
+**动作：** 调用 skill [`daily-report`](.claude/skills/daily-report/SKILL.md)。先跑它自带的 [`scripts/collect_diff.sh`](.claude/skills/daily-report/scripts/collect_diff.sh) 确定性地扫出当天 `wiki/` 下的笔记改动（工作区 + 当天 commit 合成一份净 diff，中文名不乱码，按文件分段），再压缩成 3–5 句的中文流水账日报，**只在对话里输出，不写任何文件**（不建日报文件、不动 index.md 与 log.md）。核心要求是**深度如实**：「知道名字」不能写成「研究了」，笔记里没有的不许加；拿不准就按轻的写并追问。详见 skill 文件。
+
+### 触发 6：Weekly Report（学习周报）
+
+**触发词：** "写周报"、"这周的周报"、"生成周报"、"周报"。
+
+**动作：** 调用 skill [`weekly-report`](.claude/skills/weekly-report/SKILL.md)。跑同一个 `collect_diff.sh` 的 **`--days 7 --digest`** 汇总模式（按文件净新增行数 + 按天活跃度 + 新增章节标题，不倾泻正文），再写成 6–10 句的中文周报，**同样只在对话里输出，不写任何文件**。
+
+**周报 ≠ 七份日报拼起来**：日报答「今天干了啥」，周报答「这周推进到哪了」——先认主线（净增行数最多且**跨多天**出现的那篇），再归支线，粒度到模块而非函数。没有主线就如实说这周比较散，**别硬编故事**。反臆造底线同日报，且更严：别把「写了很多字」当成「学得很深」。详见 skill 文件。
 
 ## 约定
 

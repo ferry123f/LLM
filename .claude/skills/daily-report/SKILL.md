@@ -22,7 +22,10 @@ description: 根据当天 wiki/ 目录下的笔记改动，生成一段简短的
 bash .claude/skills/daily-report/scripts/collect_diff.sh "<vault根>"
 ```
 
-脚本已经把易错的部分固化了：只看 `wiki/`、中文文件名不乱码、工作区改动 + 当天 commit 合并输出、
+不带参数 = 今天 0 点至今、逐文件列出全部新增行，正是日报要的。
+（同一个脚本还有 `--days N --digest` 汇总模式，那是给 [`weekly-report`](../weekly-report/SKILL.md) 用的，写日报别用。）
+
+脚本已经把易错的部分固化了：只看 `wiki/`、中文文件名不乱码、工作区改动 + 当天 commit 合并成一份净 diff、
 按文件分段、每文件截断到 120 行且**显式报告剩余多少行**、绕开本 vault 定时自动备份提交造成的竞态。
 
 **退出码**：
@@ -35,8 +38,9 @@ bash .claude/skills/daily-report/scripts/collect_diff.sh "<vault根>"
 
 看到「剩余 N 行未显示」而这篇恰好是今天的主线时，用 `MAX_LINES=400 bash ...` 重跑一次拿全。
 
-> 这个 vault 每隔几分钟自动 commit 一次（`vault backup: <时间戳>`），所以**一篇笔记的内容常被拆散在
-> 十几个 commit 里**。按内容合起来判断学了什么，**不要按 commit 数量估工作量**。
+> 这个 vault 每隔几分钟自动 commit 一次（`vault backup: <时间戳>`）。脚本取的是「今天 0 点前最后一个提交
+> → 当前工作区」的**净 diff**，已经把这些自动提交合并掉了，所以你看到的每个文件就是它今天的完整增量，
+> 不会被撕成十几段。**不要按 commit 数量估工作量。**
 
 ### 2. 读懂新增内容
 
