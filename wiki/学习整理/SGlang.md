@@ -122,7 +122,12 @@ flowchart TB
 ## 四、关键数据结构：RadixCache
 
 SGLang 的招牌是 **RadixAttention**——用**基数树（radix tree）**组织 KV 缓存，自动复用请求间的**公共前缀**（相同 system prompt、few-shot 示例等）。prefill 后把 KV 写进 RadixCache，后续请求命中相同前缀即**直接复用、跳过重复 prefill**。上面 ③ 的 **LPM / DFS-Weights** 调度策略，正是为了最大化这棵树的命中率。
-
+radix tree的增删改查
+增： RadixCache.insert调用RadixCache._insert_helper
+	RadixCache.cache_unfinished_req：请求 prefill 完/decode 中的便捷入口
+	RadixCache.cache_finished_req：请求完成时的便捷入口
+删： RadixCache.evict按策略驱逐叶子释放显存，策略默认 LRU（ last_access_time 最老的先删）；也支持 LFU / priority-based。
+	 RadixCache._delete_leaf：
 
 > 这也是压测时「前缀缓存会虚高吞吐」的根源——见 [[LLM推理压测-bench serve 与 throughput 参数详解]] 的避坑章节。
 
