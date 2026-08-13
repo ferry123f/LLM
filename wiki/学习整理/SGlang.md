@@ -137,9 +137,9 @@ radix tree的增删改查
 	 RadixCache.total_size：树里所有 token 总数
 Token-to-page映射：
 1. 请求 → token 序列 → KV 槽位号 （ req_to_token_pool ）
-	1.  由 ReqToTokenPool.req_to_token 这张大表（[size+1, max_context_len]） 调用ReqToTokenPool.alloc得到表的行号 调用PagedTokenToKVPoolAllocator.alloc_extend拿到槽位号 也就是表中要填的值
+	ReqToTokenPool. init初始话，由 ReqToTokenPool.req_to_token 这张大表（[size+1, max_context_len]） 调用ReqToTokenPool.alloc得到表的行号 调用PagedTokenToKVPoolAllocator.alloc_extend拿到槽位号 也就是表中要填的值。调用ReqToTokenPool.write来建立表
 2. KV 槽位号 → 实际 GPU 显存位置 （ token_to_kv_pool + allocator）
-
+	 MHATokenToKVPool 初始化，MHATokenToKVPool.set_kv_buffer，把真实 K/V 塞进槽位，_store_kv_layer 内部就是那个"按槽位号写进 k_buffer/v_buffer"的核心操作
 > 这也是压测时「前缀缓存会虚高吞吐」的根源——见 [[LLM推理压测-bench serve 与 throughput 参数详解]] 的避坑章节。
 
 ## 五、注意力 Backend 选型
