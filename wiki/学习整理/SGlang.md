@@ -22,7 +22,7 @@ SGLang 把流水线拆成**三个进程**，用 **ZMQ** 消息通道通信。这
 |---|---|
 | **主进程** | HTTP 服务 + **TokenizerManager**：把文本 tokenize 成 `input_ids` |
 | **Scheduler 子进程** | **调度大脑**：组批、管 KV 缓存、驱动模型前向 |
-| **Detokenizer 子进程** | 把输出 token 解码回文本，**流式**回传 |
+| **Detokenizer 子进程** | 把输出 token 解码回文本，**流式**回传（增量解码细节见 §七） |
 
 ```mermaid
 flowchart LR
@@ -127,8 +127,7 @@ SGLang 的招牌是 **RadixAttention**——用**基数树（radix tree）**组�
 
 ## 五、注意力 Backend 选型
 
-`run_batch` 里 GPU forward 用哪套注意力 kernel，由 `--attention-backend` 决定：
-AttentionBackend是基类，所有 backend 都实现同一套接口
+`run_batch` 里 GPU forward 用哪套注意力 kernel，由 `--attention-backend` 决定。`AttentionBackend` 是基类，所有 backend 都实现同一套接口：
 
 | Backend | 适用场景 | 特点 |
 |---|---|---|
@@ -151,7 +150,60 @@ AttentionBackend是基类，所有 backend 都实现同一套接口
 
 读源码建议：先用 `normal` 理清主干，再看 `overlap` 如何用 future + 多 stream 把流水线气泡填满。
 
+## 七、Detokenizer 事件循环：增量解码回文本
 
+Scheduler 每轮吐出的是 **token id**，得由 Detokenizer 子进程解码回文本再交给用户。它的主循环同样是「收 → 分发 → 发」三步，但难点全在**增量解码**——不能等一句话的 token 全到齐再解码，得**边收边吐**，还要保证 BPE 边界正确、不把半个 UTF-8 字符吐出去。
+
+```mermaid
+flowchart LR
+    SC[Scheduler] -->|ZMQ| R["① sock_recv<br/>收 Scheduler 的 token"]
+    R --> D["② _request_dispatcher<br/>分发 → 增量解码"]
+    D --> T["③ sock_send<br/>发回 TokenizerManager"]
+    T -->|SSE| U([用户])
+```
+
+**主循环三步：**
+
+1. **收** `recv_obj = sock_recv(self.recv_from_scheduler)`：接收 Scheduler 发来的 token 消息。
+2. **分发** `output = self._request_dispatcher(recv_obj)`：一般走 `handle_batch_token_id_out` → `_decode_batch_token_id_output`，执行增量解码。
+3. **发** `sock_send(self.send_to_tokenizer, output)`：把解好的文本发回 TokenizerManager，再由它经 **SSE** 推给用户。
+
+### 增量解码：`DecodeStatus` 与偏移量
+
+`DecodeStatus` 记录**每个请求**的解码状态，靠几个偏移量在「已确认」与「临时输出」之间划界：
+
+| 状态字段 | 含义 |
+|---|---|
+| `surr_offset` | **上下文起点**——从这里开始把 token 喂给 tokenizer 当上下文，保证 BPE 边界正确 |
+| `read_offset` | **读取终点**——到这里为止的 token 才算「确认可读」 |
+| `decoded_text_len` | 已「确认提交」的完整文本长度 |
+| `sent_offset` | 已发给用户的字节位置（半字符时可能含「临时可打印前缀」） |
+| `pending` | `= sent_offset - decoded_text_len`：上轮临时输出但没提交的字节，本轮跳过避免重复 |
+
+**本轮增量怎么算**（解两段、相减去掉重复前缀）：
+
+- 上下文段 `decode_ids[surr_offset:read_offset]` → 解码得 `surr_texts`
+- 全量段 `decode_ids[surr_offset:]` → 解码得 `read_texts`
+- **增量 = `read_texts` 去掉 `surr_texts` 前缀后剩下的后缀**——直接单独解码新 token 会因缺上下文而乱码，所以用「全量 − 上下文」取差。
+
+### 三个难点
+
+1. **增量翻译**：如上，上下文段与全量段各解一次、相减得增量，避免逐 token 解码产生的乱码。
+2. **UTF-8 边界（半个字符）**：看新解出文本的结尾——
+   - 结尾**没有** `�`：干净，直接推给用户 **+ 提交状态**（推进 offset）。
+   - 结尾**有** `�`：说明最后半个字符没解全，只推**前面完整可打印的部分**，**不推进 offset**；等下一轮 token 到齐重新解码，半字符自动补全。
+3. **批量翻译** `_grouped_batch_decode`：一次处理一批请求的解码。请求结束时（碰到 `</s>` / `stop=["\n\n"]` / `max_new_tokens`）用 **`trim_matched_stop`** 把停止符本身从输出里裁掉，否则用户会看到「结果 + `</s>`」这种脏尾巴。
+
+### 输出协议：为什么用 SSE
+
+第 3 步把文本发回 TokenizerManager 后，它用 **SSE（Server-Sent Events）** 推给用户——一种架在 HTTP 之上的**单向流式**协议，天然契合 LLM 逐字吐字：
+
+| 技术 | 方向 / 特点 | 典型场景 |
+|---|---|---|
+| 普通 HTTP | 客户端 → 服务端，一问一答，一次完整响应 | REST API |
+| **SSE** | 服务端 → 客户端，**单向流式**推送，长连接 | **LLM 流式输出**、股票行情、通知 |
+| WebSocket | **双向**长连接 | 聊天室、协作编辑 |
+| HTTP chunked | 一段一段发响应体（**SSE 的底层就用它**） | — |
 
 ## See Also
 
@@ -161,24 +213,3 @@ AttentionBackend是基类，所有 backend 都实现同一套接口
 
 - 本文基于对 SGLang 的源码走读笔记整理，聚焦主干流程；**具体函数名 / 行号可能随 SGLang 版本变化，以实际代码为准**。
 - 架构图引自 [Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) 的 SGLang code-walk-through。
-Detokenilzer：
-event_loop主循环：
-recv_obj = sock_recv(self.recv_from_scheduler) ：接受scheduler发送的消息
-output = self._request_dispatcher(recv_obj)：分发消息
-	一般情况都是分发到handle_batch_token_id_out，调用_decode_batch_token_id_output
-		Decodestatus是每个请求的翻译状态
-		surr_offset : 上下文起点 —— 从这里开始给 tokenizer 提供上下文（保证 BPE 边界正确）
-		read_offset : 读取终点 —— 到这里为止的 token 才被"确认可读"
-		上下文段: decode_ids[surr_offset:read_offset] （用来解出 surr_texts ）
-		全量段: decode_ids[surr_offset:] （用来解出 read_texts ）
-		增量 = read_texts - surr_texts
-		decoded_text_len : 已经"确认提交"的完整文本长度
-		sent_offset : 已经发给用户的字节位置（可能包含半字符时的"临时可打印前缀"）
-		pending = sent_offset - decoded_text_len : 上轮临时输出了但没提交的字节数，本轮要跳过避免重复
-		难点一：增量翻译 上下文段和全量段解码后相减得到增量 不然会乱码
-		难点二： UTF-8 边界问题 （半个字符的处理）- 如果新翻译出来的文本 结尾没有 � → 干净，直接推出去 + 提交状态。 如果 结尾有 � → 说明 最后有半个字符 没解全，只推 前面完整可打印的部分 ， 不推进 offset 。下一轮 token 到齐后再重新解码，那时半字符会补全。
-		难点三：批量翻译_grouped_batch_decode：
-		trim_matched_stop:请求结束时（碰到 </s> / stop=["\n\n"] / max_new_tokens），需要把 停止符本身 从输出里裁掉，不然用户会看到"结果 + </s> "这种脏尾巴。
-sock_send(self.send_to_tokenizer, output)：发送消息给tokenizer 它通过SSE推给用户
-	Server-Sent Events(SSE)服务器推送事件，一种HTTP之上的单向流式协议
-	技术 方向 场景 普通 HTTP 客户端 → 服务端一问一答，一次完整响应 REST API SSE 服务端 → 客户端 单向流式推送 ，长连接 LLM 流式输出 、股票行情、通知 WebSocket 双向长连接 聊天室、协作编辑 HTTP chunked 一段一段发响应体 SSE 的底层就用这个

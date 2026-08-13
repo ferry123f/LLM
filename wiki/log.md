@@ -81,3 +81,12 @@
 - 安全标注：git reset --hard 标 ⚠️ 不可恢复慎用；.gitignore 只对未跟踪文件生效需 rm --cached
 - 依据：Git 官方文档 + 通用常识；未改动用户原有命令与流程结论
 - 更新 index.md 摘要
+
+## [2026-08-13] normalize | SGLang 架构与调度循环源码走读（整合 Detokenizer 笔记）
+- 用户在上次规范化后，把一段 Detokenizer 走读笔记裸贴在文末（错落在「备注」之后），本轮结构化整合
+- 新增「七、Detokenizer 事件循环：增量解码回文本」：主循环三步（sock_recv → _request_dispatcher → sock_send）+ Mermaid 流程图
+- 结构化零散笔记：DecodeStatus 偏移量表（surr_offset/read_offset/decoded_text_len/sent_offset/pending）、增量=全量段−上下文段的取差逻辑、三个难点（增量翻译 / UTF-8 半字符边界 / _grouped_batch_decode + trim_matched_stop）
+- 重建被压成一行的 SSE 对照表（普通 HTTP / SSE / WebSocket / HTTP chunked）
+- 修正笔误：Detokenilzer→Detokenizer；顺手理顺 §五 attention-backend 引言断句
+- 在 §二 Detokenizer 行加「详见 §七」前向索引；raw 未涉及（本主题无 raw 素材）
+- 更新 index.md 摘要与 Updated 日期 2026-08-12 → 2026-08-13
