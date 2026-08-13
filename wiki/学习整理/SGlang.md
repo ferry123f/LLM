@@ -22,7 +22,7 @@ SGLang 把流水线拆成**三个进程**，用 **ZMQ** 消息通道通信。这
 |---|---|
 | **主进程** | HTTP 服务 + **TokenizerManager**：把文本 tokenize 成 `input_ids` |
 | **Scheduler 子进程** | **调度大脑**：组批、管 KV 缓存、驱动模型前向 |
-| **Detokenizer 子进程** | 把输出 token 解码回文本，**流式**回传（增量解码细节见 §七） |
+| **Detokenizer 子进程** | 把输出 token 解码回文本，**流式**回传（增量解码细节见 §八） |
 
 ```mermaid
 flowchart LR
@@ -119,28 +119,110 @@ flowchart TB
 
 **记忆口诀：收（recv）→ 分（process input）→ 组（get batch）→ 跑（run）→ 收尾（process result）。**
 
-## 四、关键数据结构：RadixCache
+## 四、关键数据结构：RadixCache 与 KV 内存池
 
 SGLang 的招牌是 **RadixAttention**——用**基数树（radix tree）**组织 KV 缓存，自动复用请求间的**公共前缀**（相同 system prompt、few-shot 示例等）。prefill 后把 KV 写进 RadixCache，后续请求命中相同前缀即**直接复用、跳过重复 prefill**。上面 ③ 的 **LPM / DFS-Weights** 调度策略，正是为了最大化这棵树的命中率。
-radix tree的增删改查
-增： RadixCache.insert调用RadixCache._insert_helper
-	RadixCache.cache_unfinished_req：请求 prefill 完/decode 中的便捷入口
-	RadixCache.cache_finished_req：请求完成时的便捷入口
-删： RadixCache.evict按策略驱逐叶子释放显存，策略默认 LRU（ last_access_time 最老的先删）；也支持 LFU（根据命中次数，复用率低的先删） / priority-based（综合方法）。
-	 RadixCache._delete_leaf：从树里摘掉叶子节点
-		 RadixCache.reset：清空这个树
-改： RadixCache._split_node：节点分裂（部分匹配时）
-	 RadixCache.inc_lock_ref：一个请求开始用某前缀-》从叶子往上lock_ref++
-	 RadixCache.dec_lock_ref：请求结束后-》从叶子往上一路lock_ref--
-查：  RadixCache.match_prefix：查找最长前缀：给一段token序列，返回“树里有多少前缀已经缓存了”以及对应的KV索引。核心调用RadixCache._match_prefix_helper，递归查找
-	 RadixKey.match：两段 token 的最长公共前缀算法（指数搜索+二分 O(log n)）
-	 RadixCache.total_size：树里所有 token 总数
-Token-to-page映射：
-1. 请求 → token 序列 → KV 槽位号 （ req_to_token_pool ）
-	ReqToTokenPool. init初始话，由 ReqToTokenPool.req_to_token 这张大表（[size+1, max_context_len]） 调用ReqToTokenPool.alloc得到表的行号 调用PagedTokenToKVPoolAllocator.alloc_extend拿到槽位号 也就是表中要填的值。调用ReqToTokenPool.write来建立表
-2. KV 槽位号 → 实际 GPU 显存位置 （ token_to_kv_pool + allocator）
-	 MHATokenToKVPool 初始化，MHATokenToKVPool.set_kv_buffer，把真实 K/V 塞进槽位，_store_kv_layer 内部就是那个"按槽位号写进 k_buffer/v_buffer"的核心操作
+
 > 这也是压测时「前缀缓存会虚高吞吐」的根源——见 [[LLM推理压测-bench serve 与 throughput 参数详解]] 的避坑章节。
+>
+> 以下实现细节基于 `python/sglang/srt/mem_cache/`（radix_cache.py / evict_policy.py / memory_pool.py / allocator/paged.py），版本见文末备注。
+
+### 4.1 树的增删改查
+
+| 操作 | 入口方法 | 说明 |
+|---|---|---|
+| **增** | `insert` → `_insert_helper` | 把一段 token 序列及其 KV 索引挂进树 |
+| | `cache_unfinished_req` | 便捷入口：请求 prefill 完 / decode 途中调用 |
+| | `cache_finished_req` | 便捷入口：请求结束时调用 |
+| **删** | `evict` | 按策略驱逐叶子释放显存（详见 4.2） |
+| | `_delete_leaf` | 从树上摘掉一个叶子节点 |
+| | `reset` | 清空整棵树 |
+| **改** | `_split_node` | **节点分裂**：新序列只匹配到某节点的一部分时，把该节点拆成「公共段 + 剩余段」两级 |
+| | `inc_lock_ref` / `dec_lock_ref` | 引用计数升降（详见 4.3） |
+| **查** | `match_prefix` → `_match_prefix_helper` | 给一段 token 序列，返回「树里已缓存多少前缀」+ 对应的 KV 索引；沿树递归下行 |
+| | `RadixKey.match` | 两段 token 求最长公共前缀（详见 4.4） |
+| | `total_size` | 树里所有 token 总数 |
+
+### 4.2 驱逐：七种策略，共用一个 `get_priority`
+
+`evict` 的做法是：把所有**可驱逐叶子**按 `eviction_strategy.get_priority(node)` 建成**最小堆**，从堆顶依次弹出删除，直到腾够 token 数。所谓「策略」，本质上就是**返回一个排序键的函数**——值小的先被删。全部实现在 `evict_policy.py`，共 7 种：
+
+| 策略 | `get_priority()` 返回 | 效果 |
+|---|---|---|
+| **`lru`（默认）** | `last_access_time` | 最久没被访问的先删 |
+| `lfu` | `(hit_count, last_access_time)` | 命中次数最少的先删，同命中数再比时间 |
+| `fifo` | `creation_time` | 最早建的先删 |
+| `mru` | `-last_access_time` | 最近刚用过的先删（LRU 取反） |
+| `filo` | `-creation_time` | 最晚建的先删（FIFO 取反） |
+| `priority` | `(node.priority, last_access_time)` | **请求优先级**低的先删，同优先级内按 LRU |
+| `slru` | `(hit_count >= 2, last_access_time)` | 分段 LRU：命中 ≥2 次进「保护段」，「试用段」整体先于保护段被删 |
+
+命令行开关 `--radix-eviction-policy`，默认 `lru`。
+
+两个容易漏掉的实现细节：
+
+1. **驱逐会顺着分支向上级联**：删掉一个叶子后，若其父节点因此变成「无子节点且 `lock_ref == 0`」，父节点会**立刻被压回堆里**成为新的候选。所以驱逐是顺着一条分支往上啃，而不是只削掉最外层叶子。
+2. **只有叶子进候选集**：候选来自 `evictable_leaves`，被锁住的节点不在其中——这正是下一节的作用。
+
+### 4.3 `lock_ref`：防止正在用的前缀被删掉
+
+`inc_lock_ref(node)` 从该节点一路走到 root，沿途每个节点 `lock_ref += 1`；`dec_lock_ref` 反之。但真正的关键不在计数本身，而在于它同时在**两个显存账本之间搬账**：
+
+- `lock_ref` 由 `0 → 1` 时：这段 key 的长度从 `evictable_size_` **转入** `protected_size_`
+- 由 `1 → 0` 时：再转回来
+
+因为 `evict` 只在可驱逐集合里挑，所以 **`lock_ref > 0` 的前缀不可能被驱逐**。这就是为什么请求开始使用某前缀时必须 `inc`、结束时必须 `dec`——**漏掉 `dec` 会让这条分支永久占着显存不放**，表现为可用 KV 缓存越跑越少。
+
+### 4.4 前缀匹配：指数搜索 + 二分
+
+`RadixKey.match` 求两段 token 的最长公共前缀，**没有用逐 token 的 Python 循环**，而是两段式：
+
+1. **指数搜索（galloping）**：按 1、2、4、8… 倍增窗口做整段切片比较，每次是一趟 C 层比较；
+2. 命中第一个「不相等」的窗口后，**在该窗口内二分**定位精确的分歧点。
+
+比较次数降到 O(log n) 量级。这么设计的动机很实际：**前缀缓存的典型场景恰恰就是超长公共前缀**（相同 system prompt、few-shot 示例），逐 token 比对会把 Python 解释器开销放大到不可接受。
+
+> 返回的匹配长度还会按 `page_size` **向下取整**——匹配点必须落在页边界上，否则没法整页复用 KV。
+
+### 4.5 Token-to-page：两级映射
+
+从「第几个请求的第几个 token」定位到「GPU 显存里的哪一块」，SGLang 走的是**两级间接**：
+
+```mermaid
+flowchart LR
+    R["请求 + token 位置"] -->|"① ReqToTokenPool<br/>req_to_token[行号, 位置]"| S["KV 槽位号"]
+    S -->|"② token_to_kv_pool<br/>+ allocator"| M["GPU 显存<br/>k_buffer / v_buffer"]
+```
+
+#### 第一级：`ReqToTokenPool` —— 请求 → 槽位号
+
+核心是一张二维大表 `req_to_token`，形状 `[size + 1, max_context_len]`，`dtype=torch.int32`：
+
+| 方法 | 作用 |
+|---|---|
+| `__init__` | 建表（`torch.zeros`），并把空闲行 `free_slots` 初始化为 `1 .. size` |
+| `alloc(reqs)` | 给一批请求分配**行号**（`req_pool_idx`）；已有行号的请求（如 chunked prefill 跨块续跑）直接复用原行 |
+| `write(indices, values)` | 往表里填值——即把 KV 槽位号写进 `[行号, token 位置]` |
+
+> **为什么第一维是 `size + 1` 而不是 `size`**：第 0 行是**专门空出来的 padding 行**。CUDA Graph 捕获的批次是定长的，凑数用的假请求其 `req_pool_indices` 默认为 0，让它们的读写统一落在第 0 行，就不会踩到真实请求的数据。`free_slots` 从 **1** 开始正是为此。
+>
+> 表用 `int32` 而非 int64，收益见 [[LLM推理的GPU硬件基础]] 中索引位宽一节。
+
+#### 第二级：`token_to_kv_pool` + allocator —— 槽位号 → 显存
+
+**分配**由 `PagedTokenToKVPoolAllocator`（`mem_cache/allocator/paged.py`）负责，按**页**管理，三个入口对应三种场景：
+
+| 方法 | 场景 |
+|---|---|
+| `alloc(need_size)` | 通用批量分配，要求页对齐，返回连续页展开后的槽位号 |
+| `alloc_extend(...)` | **prefill / extend**：只为新增部分分配页；命中前缀的那**半页会被接着写满**，靠 `last_loc` 保证页内对齐 |
+| `alloc_decode(...)` | **decode**：每步只追加 1 个 token |
+
+其中 `alloc_extend` 内部调的是 Triton kernel `alloc_extend_kernel`——要为整批请求并行算出各自的槽位分布，纯 Python 循环撑不住。
+
+**写入**由 `MHATokenToKVPool.set_kv_buffer(layer, loc, cache_k, cache_v)` 完成，把算好的 K/V 按槽位号写进显存，内部的 `_store_kv_layer` 就是那个「按槽位号写进 `k_buffer` / `v_buffer`」的核心操作。
+
+> `set_kv_buffer` 是基类 `KVCache` 定义的统一接口，MLA、FP8、FP4、page-major、混合线性等各种池子都各自实现一版——**换 KV 布局只需换池子，注意力 backend 与调度层不用动**。
 
 ## 五、注意力 Backend 选型
 
@@ -321,4 +403,5 @@ flowchart LR
 ## 备注
 
 - 本文基于对 SGLang 的源码走读笔记整理，聚焦主干流程；**具体函数名 / 行号可能随 SGLang 版本变化，以实际代码为准**。
+- **版本基准**：§四（RadixCache 与 KV 内存池）与 §六（国产 GPU/NPU 适配清单）的实现细节均实扫自本地仓库 `d:/project/sglang`，commit `fdebc938f7`（release/v0.5.16 线）。
 - 架构图引自 [Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) 的 SGLang code-walk-through。

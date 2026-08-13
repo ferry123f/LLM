@@ -142,3 +142,24 @@
   - ⚠️ 该文件在 `.gitignore:8`，属机器专属配置**不随 git 同步**，另一台电脑需手动设一次：设置 → 文件与链接 → 新附件的默认位置 → 「在以下文件夹中」→ `assets/_inbox`
 - **固化约定**：CLAUDE.md 新增「assets 规矩」5 条（落点镜像主题 / 文件名全局唯一且描述性 / 引用一律短链不写路径 / _inbox 是暂存区且每次 ingest-normalize 必须清空 / 改名必须连引用一起改），让后续录入自动遵守，不再靠临时判断
 - raw 未涉及
+
+## [2026-08-13] normalize | SGLang 架构与调度循环源码走读（RadixCache 与 KV 内存池深挖）
+- 用户在 §四 RadixCache 后面裸贴了一段生笔记（radix tree 增删改查 + Token-to-page 映射），制表符缩进、无结构、有笔误
+- **所有说法均实扫本地仓库 `d:/project/sglang`（commit `fdebc938f7`，release/v0.5.16）核对后才落笔**，非训练知识
+- 章节改名：「四、关键数据结构：RadixCache」→「四、关键数据结构：RadixCache 与 KV 内存池」（内容已超出单一数据结构）
+- **结构化**：裸文本拆成 4.1 树的增删改查（表格）/ 4.2 驱逐策略 / 4.3 lock_ref / 4.4 前缀匹配 / 4.5 Token-to-page 两级映射（含 Mermaid 图）
+- **核对属实、予以保留的**：`RadixKey.match` 的「指数搜索+二分 O(log n)」（源码注释明写 gallop，无逐 token Python 循环）；`req_to_token` 形状 `[size+1, max_context_len]`；`_store_kv_layer` 确属 `MHATokenToKVPool`（曾疑心张冠李戴，查证后确认无误）
+- **补全（原笔记缺失）**：
+  - 驱逐策略由 3 种补到**全部 7 种**（lru 默认 / lfu / fifo / mru / filo / priority / slru），并点出统一抽象——「策略」只是一个返回排序键的 `get_priority()`，最小堆弹出最小者；开关是 `--radix-eviction-policy`
+  - `evict` **会顺分支向上级联**：删掉叶子后父节点若变成无子且 lock_ref==0，立刻压回堆成为新候选（原笔记只写「驱逐叶子」）
+  - `lock_ref` 的**目的**：inc/dec 真正做的是在 `evictable_size_` 与 `protected_size_` 之间搬账，使锁住的前缀不可能被驱逐；漏 dec 会导致该分支永久占显存（原笔记只写 ++/--）
+  - `req_to_token` 第一维 `+1` 的**原因**：第 0 行是 CUDA Graph 定长批次凑数假请求的 padding 行（`req_pool_indices` 默认 0），`free_slots` 从 1 开始
+  - allocator **三个入口分工**：`alloc`（页对齐批量）/ `alloc_extend`（prefill，复用命中前缀的半页，靠 `last_loc` 对齐，内部走 Triton kernel `alloc_extend_kernel`）/ `alloc_decode`（每步 1 token）——原笔记只提了 alloc_extend
+  - `set_kv_buffer` 是基类 `KVCache` 的统一接口，MLA/FP8/FP4/page-major 各自实现 → 换 KV 布局不动 backend 与调度层
+- **纠正**：`priority` 策略原写「综合方法」，实为**按请求优先级**低者先删、同级内 LRU；`ReqToTokenPool. init初始话` → `__init__` / 初始化；`-》` → `→`
+- **修失效交叉引用**：§二 Detokenizer 行写「详见 §七」，但上次插入「六、国产适配」后 Detokenizer 已后移为 §八，改指 §八（上次改标题时漏改正文指路）
+- 版式：把「前缀缓存虚高吞吐」的提示从内存池细节之后挪回节首（属 RadixAttention 概念范畴），消掉两个相邻引用块
+- 补版本基准到「备注」，作为 §四 与 §六 共用的单一出处
+- 呼应 `req_to_token` 用 int32 → 补链 [[LLM推理的GPU硬件基础]] 索引位宽一节（See Also 原本就有该条，此处为正文内联呼应）
+- raw 未涉及；`assets/_inbox` 本次为空，无需清理
+- 更新 index.md 摘要（Updated 仍为 2026-08-13）
