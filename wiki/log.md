@@ -90,3 +90,13 @@
 - 修正笔误：Detokenilzer→Detokenizer；顺手理顺 §五 attention-backend 引言断句
 - 在 §二 Detokenizer 行加「详见 §七」前向索引；raw 未涉及（本主题无 raw 素材）
 - 更新 index.md 摘要与 Updated 日期 2026-08-12 → 2026-08-13
+
+## [2026-08-13] ingest | SGLang 国产 GPU/NPU 适配文件清单
+- 素材来源：本地仓库 d:/project/sglang（commit fdebc938f7，release/v0.5.16 线）实扫，非训练知识
+- 新增「六、国产 GPU/NPU 适配文件清单」，原「六、两种事件循环对比」→ 七，「七、Detokenizer」→ 八
+- 内容：适配三落点（is_npu/is_musa 探测 → hardware_backend/<device>/ 实现 → attention_registry 注册）
+- 昇腾 Ascend：树内全栈（attention 6 文件 / graph_runner 6 / MoE 7 / 量化 4 / dsv4 4 / 显存 3 + PD 分离、通信、LoRA、torch 补丁等散点），5 条 CI workflow，16 篇文档
+- 摩尔线程 MUSA：树内浅适配（attention + topk + patch_torch），特点是 sgl-kernel 里自带独立 C++ 编译链（setup_musa.py / csrc/musa/ 等），2 条 CI，1 篇文档
+- 昆仑芯等其余国产芯片：树内零命中（实扫 cambricon/biren/metax/hygon/iluvatar/tecorigin 全 0），走树外插件 SGLANG_PLATFORM + srt/plugins/
+- 纠错提示：xpu 是 Intel 独显（hardware_backend/xpu/__init__.py 明写），不是昆仑芯，避免望名生义
+- 更新 index.md 摘要
