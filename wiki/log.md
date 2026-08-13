@@ -100,3 +100,11 @@
 - 昆仑芯等其余国产芯片：树内零命中（实扫 cambricon/biren/metax/hygon/iluvatar/tecorigin 全 0），走树外插件 SGLANG_PLATFORM + srt/plugins/
 - 纠错提示：xpu 是 Intel 独显（hardware_backend/xpu/__init__.py 明写），不是昆仑芯，避免望名生义
 - 更新 index.md 摘要
+
+## [2026-08-13] ingest | LLM 推理的 GPU 硬件基础
+- 新建 wiki/学习整理/LLM推理的GPU硬件基础.md（对话合成，无 raw 素材）
+- 主线：以 roofline 脊点（H100 约 295 FLOP/Byte）统摄全篇，prefill=compute-bound / decode=memory-bound 是理解一切优化的钥匙
+- 内容：显存四块构成与权重/KV 计算公式（MHA/GQA/MQA/MLA 对比）、单流 decode 上限=带宽÷权重、内存层级与 FlashAttention 原理、int32 vs int64 四点收益、算力精度格式与 sparsity 读数坑、TP/PP/EP/DP 通信代价、常见卡对照、容量规划实例、速查公式、硬件事实→框架对策对照表
+- 交叉引用：新增 See Also 指向 SGlang / 压测详解 / DeepSeek-V3；并**反向**给 SGlang.md 与压测详解补上指回本文的条目
+- 三篇构成闭环：硬件原理 → 框架实现 → 压测验证
+- 更新 index.md（学习整理组新增条目，按字母序置于压测详解之前）

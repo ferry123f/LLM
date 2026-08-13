@@ -267,3 +267,4 @@ vllm bench throughput --model meta-llama/Llama-3.1-8B-Instruct \
 ## See Also
 
 - [[SGlang]] — SGLang 使用笔记
+- [[LLM推理的GPU硬件基础]] — 压测数字背后的硬件解释：TTFT 反映 prefill（compute-bound），TPOT/ITL 反映 decode（memory-bound）；单流 decode 速度上限 = 带宽 ÷ 权重字节，可用来判断实测有没有跑到硬件天花板。

@@ -10,5 +10,6 @@
 
 - [Docker 常用命令](学习整理/docker.md) — Docker 镜像/容器核心区分 + 镜像/容器/run 参数/日志/清理/Compose 常用命令速查（已纠正镜像与容器混淆）。Updated: 2026-08-10
 - [Git 常用命令](学习整理/git.md) — Git 首次配置、初始化关联远程、日常 add/commit/pull/push 上传流程，外加查历史/撤销回退/分支/.gitignore/rebase 冲突处理等高频救急命令速查。Updated: 2026-08-12
+- [LLM 推理的 GPU 硬件基础](学习整理/LLM推理的GPU硬件基础.md) — 从「算力/带宽失衡」（H100 约 295 FLOP/Byte）出发讲清 LLM 推理的硬件约束：prefill 是 compute-bound、decode 是 memory-bound；显存四块构成与 KV cache 计算公式（MHA/GQA/MQA/MLA 对比）；单流 decode 速度上限 = 带宽÷权重；内存层级、精度格式、TP/PP/EP 互联代价、常见卡对照与容量规划实例；附 int32 vs int64 的四点收益与速查公式。Updated: 2026-08-13
 - [LLM 推理压测：bench serve 与 throughput 参数详解](学习整理/LLM推理压测-bench%20serve%20与%20throughput%20参数详解.md) — SGLang 与 vLLM 两框架的在线压测（serve）与离线吞吐（throughput）逐参数详解，含 TTFT/TPOT/ITL/goodput 指标解释、四命令对照表与上手示例。Updated: 2026-08-10
 - [SGLang 架构与调度循环源码走读](学习整理/SGlang.md) — SGLang 三进程模型（Tokenizer/Scheduler/Detokenizer）+ 三层架构走读，逐步拆解 Scheduler 事件循环 recv→分发→组批→run→result：含组批优先级策略（FCFS/LPM/DFS-Weights/LOF…）、采样算法、grammar 约束、eager/CUDA Graph、RadixCache 前缀复用与注意力 backend 选型；含国产 GPU/NPU 适配文件清单（昇腾树内全栈 / 摩尔线程 MUSA / 昆仑芯等走树外插件）与 Detokenizer 增量解码（BPE 边界 / UTF-8 半字符 / trim_matched_stop）+ SSE 流式输出协议。Updated: 2026-08-13
