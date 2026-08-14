@@ -163,3 +163,10 @@
 - 呼应 `req_to_token` 用 int32 → 补链 [[LLM推理的GPU硬件基础]] 索引位宽一节（See Also 原本就有该条，此处为正文内联呼应）
 - raw 未涉及；`assets/_inbox` 本次为空，无需清理
 - 更新 index.md 摘要（Updated 仍为 2026-08-13）
+
+## [2026-08-14] query | Archived: DeepSeek-V4 config.json 逐项详解与显存估算
+- 素材：用户在对话中提供的 V4-Pro 与 V4-Flash 两份 config.json，追问「面向小白逐项讲清 + 公式与 KV cache 估算」
+- 新建 wiki/deepseek/DeepSeek-V4 config.json 逐项详解与显存估算.md（归档合成答案，不合并进已有文章）
+- 内容：字段按骨架/注意力/压缩注意力/长上下文/MoE/mHC/精度七组逐项解读；三笔账全程手算——总参 1.6T（385 专家×66M×61 层）、激活 49B、KV cache 基线 250 GB → MQA+latent 41 GB → 压缩条目 5.2 GB（≈2%，与论文数字互证）；部署估算 825 GB 权重需 8×H200；附 Flash 对比速览（三大创新未动、只砍尺寸、MoE 精确回退 V3 配置）
+- 存疑已标注：compress_ratios 的 4/128 归属、o_lora_rank、hc_eps、compress_rope_theta 为字段名推断；Flash 独有 dspark_* 四字段不明（疑似块级投机解码，待查 modeling 代码）；Flash compress_ratios 46 项 vs 44 层对不上
+- Updated: DeepSeek-V4 架构与百万上下文效率（See Also 补反向链接）

@@ -4,6 +4,7 @@
 
 - [DeepSeek-V3 架构与低成本高效训练](deepseek/DeepSeek-V3%20架构与低成本高效训练.md) — DeepSeek-V3（671B / 激活 37B）用 MLA + DeepSeekMoE + 无辅助损失负载均衡 + MTP，配合 FP8 训练与 DualPipe，把完整训练成本压到 2.788M H800 GPU 时（约 $5.576M），性能追平 GPT-4o 与 Claude-3.5-Sonnet，是当时最强开源模型（含论文官方架构图 Fig2/3/6 与核心公式）。Updated: 2026-08-07
 - [DeepSeek-V4 架构与百万上下文效率](deepseek/DeepSeek-V4%20架构与百万上下文效率.md) — DeepSeek-V4（Pro 1.6T / Flash 284B）用混合注意力 CSA+HCA、mHC 超连接、Muon 优化器把 1M token 上下文推理成本压到 V3.2 的 10–27%，附完整架构、训练与评测消化（含论文官方架构图 Fig2/3/4 与核心公式）。Updated: 2026-08-12
+- [DeepSeek-V4 config.json 逐项详解与显存估算](deepseek/DeepSeek-V4%20config.json%20逐项详解与显存估算.md) — [Archived] 面向初学者：拿 V4-Pro 的 config.json 逐字段放回 Transformer 骨架（骨架/注意力/压缩/MoE/mHC/精度六组），再一步步算出 1.6T 总参、49B 激活、1M 上下文 KV cache 从基线 250 GB 砍到 5.2 GB（≈2%，与论文互证）的完整账，附 Flash 对比速览与两个未解之谜（dspark_* 字段、compress_ratios 长度不符）。Updated: 2026-08-14
 - [Hyper-Connections 超连接](deepseek/Hyper-Connections%20超连接.md) — 残差连接的可学习替代（ByteDance, ICLR 2025）：用深度连接 + 宽度连接（扩展率 n）化解 Pre-/Post-Norm 的「梯度消失↔表示崩塌」跷跷板，DHC×4 收敛快 1.8×、ARC +6 分；是 DeepSeek-V4 mHC 的理论基础（含论文 Figure 2 示意图与核心公式）。Updated: 2026-08-12
 
 ## 学习整理
