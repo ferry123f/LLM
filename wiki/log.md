@@ -170,3 +170,30 @@
 - 内容：字段按骨架/注意力/压缩注意力/长上下文/MoE/mHC/精度七组逐项解读；三笔账全程手算——总参 1.6T（385 专家×66M×61 层）、激活 49B、KV cache 基线 250 GB → MQA+latent 41 GB → 压缩条目 5.2 GB（≈2%，与论文数字互证）；部署估算 825 GB 权重需 8×H200；附 Flash 对比速览（三大创新未动、只砍尺寸、MoE 精确回退 V3 配置）
 - 存疑已标注：compress_ratios 的 4/128 归属、o_lora_rank、hc_eps、compress_rope_theta 为字段名推断；Flash 独有 dspark_* 四字段不明（疑似块级投机解码，待查 modeling 代码）；Flash compress_ratios 46 项 vs 44 层对不上
 - Updated: DeepSeek-V4 架构与百万上下文效率（See Also 补反向链接）
+
+## [2026-08-18] normalize | SGLang 架构与调度循环源码走读（注意力 Backend 深挖）
+- 用户在 §五 表格后裸贴了三个 backend 的走读笔记（制表符缩进、无结构、句末带「-》」箭头），本轮结构化并大幅补全
+- **所有说法均实扫本地仓库 `d:/project/sglang`（commit `fdebc938f7`，tag `v0.5.16`）核对后才落笔**，非训练知识
+- 章节改名：「五、注意力 Backend 选型」→「五、注意力 Backend：基类契约与三种实现」（原标题只覆盖选型表，已容不下内容）
+- **结构化**：裸文本拆成 5.1 可选 Backend 一览 / 5.2 基类契约 / 5.3 Triton / 5.4 FlashInfer / 5.5 TorchNative / 5.6 三者对比
+- **核对属实、予以保留的**：Triton 三索引数组语义（`kv_indices` 长条 / `kv_indptr` 段落分界 / `qo_indptr` extend 时 Q 分界）；Triton 构造四步；FlashInfer 构造四步（workspace / indptr buffer / wrapper / IndicesUpdater 适配层）与 plan/run 两阶段；TorchNative 逐请求 gather + SDPA、`_run_sdpa_forward_extend` 的七步循环（含「造带空位前缀的完整 Q」）
+- **补全（原笔记完全缺失——用户明说基类没写，要求补）**：
+  - **基类 `AttentionBackend` 三组契约**（`base_attn_backend.py`，260 行全读）：
+    ① `forward()` 由基类实现、按 `forward_mode` 分发到 `forward_decode` / `forward_extend` / `forward_mixed`（后者仅 `is_npu()` 走），idle 直接返回空张量——**三个钩子才是子类要填的空**
+    ② metadata 三方法契约 `init_forward_metadata` / `_out_graph(fb, in_capture)` / `_in_graph`，按「能否录进 CUDA Graph」切分；`_in_graph` 的 lint 契约明写禁用 `.item()` / `.cpu()` / `.tolist()` / 动态 shape `torch.empty()`
+    ③ 能力声明类属性 `needs_cpu_seq_lens`（Triton 覆盖为 `False`）/ `supports_ragged_verify_graph` / `use_captured_forward_metadata_for_breakable_cuda_graph` / `support_triton()`（TorchNative 覆盖为 `False`）/ `get_cuda_graph_seq_len_fill_value` / `get_indexer_metadata`
+  - 注册机制：`ATTENTION_BACKENDS` 字典 + `@register_attention_backend` 挂的是**工厂函数不是类**，故 `flashinfer` 可按 `use_mla_backend` 分流到 `FlashInferAttnBackend` / `FlashInferMLAAttnBackend`
+  - 点明 Triton 三索引数组即 **CSR（压缩稀疏行）布局**，`indptr` 长度恒 `bs+1`、由 `cumsum` 填出；补 `ForwardMetadata` 其余字段（`attn_logits`/`attn_lse`/`num_kv_splits`/`custom_mask`/`mask_indptr`/`window_*`）
+  - 补 Triton `init_forward_metadata` 三条 mode 分支的差异（decode 无 `qo_indptr`；target_verify 用 `arange` 等步长而非 cumsum，因草稿 token 数恒定）
+  - 补「为什么 plan/run 要分」：规划只依赖 batch 形状与 K/V 数值无关，plan 一次、几十层 run 复用 → 天然属「每批一次」
+  - 补 FlashInfer 三类 wrapper（Ragged / Paged-prefill+verify / Decode）与 `num_wrappers` 由滑动窗口决定
+  - **`plan_stream`（原笔记只留「关于 plan_stream」一句没写完）**：实为 `attention_registry.py:51-56` 里**仅当 `speculative_algorithm == "EAGLE"`** 才创建的独立 CUDA Stream，用于让 plan 与主 stream 计算重叠，使用点在 `speculative/eagle_worker_v2.py`
+  - 补 TorchNative 的定位（无编译期依赖 → 兜底与对拍基准）与源码自带的 `TODO: this loop process a sequence per iter, this is inefficient`
+  - 补「造带空位前缀的完整 Q」的**动因**：SDPA `is_causal=True` 按 Q/K 等长对齐推导掩码，故补齐后算完再裁掉前缀段
+- **新增 5.6 三者对比表**（用户明确要求「三者的一些对比学习」）：11 个维度横向对比 + 三条结论（复杂度与性能正相关 / 越快的 backend 越多工作被挪出 forward / 基类抽象经受住三种极端实现）
+- **纠正**：`init_forward_metedata` → `init_forward_metadata`（笔误）；`TorchNativeAttnBackend` 的 `init_forward_metadata` 原写「如果启用了 SWA kv pool…」属实但漏了它**几乎是空方法**这一关键对比点，已补
+- **交叉呼应**：§5.2 能力声明呼应 §4.2 `get_priority` 与 §4.5 `set_kv_buffer`（同为「变化点收进窄接口」）；§5.4 `plan_stream` 呼应 §三 `event_loop_overlap` 多 stream；§5.5 冗余 Q 呼应 §八 Detokenizer「全量减上下文」（同为「宁可重算不维护复杂状态」）；§5.6 结论 3 呼应 §六 国产卡注册机制
+- **存疑（标注未自动改）**：§5.4 末尾标 ⚠️——`plan_stream` 仅 EAGLE 路径创建，若用户当时读的是 `speculative/dflash_info_v2.py` 的 `_get_overlap_plan_stream` 则语境不同，待用户确认
+- 版本基准从「§四与§六」扩为「§四、§五与§六」；`release/v0.5.16 线` 改为准确的 `tag v0.5.16`
+- raw 未涉及；`assets/_inbox` 本次为空，无需清理
+- 更新 index.md 摘要与 Updated 日期 2026-08-13 → 2026-08-18

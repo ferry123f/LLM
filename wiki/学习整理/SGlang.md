@@ -224,9 +224,13 @@ flowchart LR
 
 > `set_kv_buffer` 是基类 `KVCache` 定义的统一接口，MLA、FP8、FP4、page-major、混合线性等各种池子都各自实现一版——**换 KV 布局只需换池子，注意力 backend 与调度层不用动**。
 
-## 五、注意力 Backend 选型
+## 五、注意力 Backend：基类契约与三种实现
 
-`run_batch` 里 GPU forward 用哪套注意力 kernel，由 `--attention-backend` 决定。`AttentionBackend` 是基类，所有 backend 都实现同一套接口：
+`run_batch` 里 GPU forward 用哪套注意力 kernel，由 `--attention-backend` 决定。这一节先讲**基类定了什么契约**，再看 Triton / FlashInfer / TorchNative 三种实现如何各自兑现，最后横向对比。
+
+> 以下实现细节实扫自 `python/sglang/srt/layers/attention/`（`base_attn_backend.py` / `triton_backend.py` / `flashinfer_backend.py` / `torch_native_backend.py` / `attention_registry.py`），版本见文末备注。
+
+### 5.1 可选 Backend 一览
 
 | Backend | 适用场景 | 特点 |
 |---|---|---|
@@ -238,40 +242,169 @@ flowchart LR
 | **cutlass_mla** | 特定场景 | MLA 的 CUTLASS 实现 |
 | **aiter** | AMD ROCm | AMD 专用 |
 | **ascend** | Ascend NPU | 华为昇腾芯片 |
-元数据是"说明数据怎么读"的描述信息——每条序列多长、它的 KV 散落在池子的哪些位置、每条请求的 query 从第几行开始。
-Triton Backend：
-	KV_indices:所有请求的kv槽位号拉成一个长条，数组
-	 KV_indptr:段落分界点
-	 qo_indptr:extend时，每个请求带N个新token的Q，记录不同token的Q分界点
-	 构造函数：
-		 1.拿到（req_to_token_pool索引表，token_to_kv_pool真显存，allocator分配器）
-		 2.注册kernel函数
-		 3.预分配indptrbuffer
-		 4.参数配置（sliding window、MLA、DCP、投机解码）
-	init_forward_metedata（decode或idle、target verify、extend/prefill）
-	forward_extend
-		1.准备输出buffer
-		2.存KV cache
-		3.选择kv_indptr
-		4.调triton kernel
-	 forward_decode
-FlashInfer Backend：
-	FlashInfer是CMU产出的推理kernel库，有wrapper+plan/run两个阶段，plan阶段会做很多的cpu侧的准备工作
-	 构造函数：
-		 1.预分配workspace
-		 2.预分配kv_indptr/qo_indptr buffer
-		 3.创建wrapper实例
-		 4.创建indicesupdater，把sglang的kc cache表翻译成FlashInfer plan输入的适配层
-	init_forward_metadata:plan阶段（decode、target verify、extend/prefill）
-	forward_extend/forward_decode:run阶段
-	关于plan_stream
-TorchNativeAttnBackend:
-	逐请求循环，每次gather一个请求的kv
-	1.构造函数：
-	2.init_forward_metadata:如果启用了SWA kv pool，把out_cache_loc从full池坐标翻译为SWA池坐标
-	3.forward_extend:分配输出-》决定写去哪-》存kv cache-》决定是不是GQA-》调用_run_sdpa_forward_extend(python函数，不是kernel)
-	4._run_sdpa_forward_extend：SDPA要求（H、N、D）排布-》循环体，逐请求处理-》决定要处理多少个token-》切出该请求的Q-》造一个包含空位前缀的完整的Q-》拉这个请求的k、v-》dtype对齐-》处理sliding window mask-》attention-》保留新token部分
-	5._run_sdpa_forward_decode
+
+注册机制在 `attention_registry.py`：一个全局字典 `ATTENTION_BACKENDS` + 装饰器 `@register_attention_backend("<名字>")`，把**工厂函数**（不是类）挂进去。工厂函数收 `runner`，可以在建对象前做额外准备——例如 flashinfer 的工厂会先判断 `runner.use_mla_backend` 决定返回 `FlashInferAttnBackend` 还是 `FlashInferMLAAttnBackend`，**同一个 `--attention-backend flashinfer` 落到两个类**。
+
+### 5.2 基类 `AttentionBackend` 定的契约
+
+基类在 `base_attn_backend.py`，是个 `ABC`，只有约 260 行，但它规定了**所有 backend 必须长成什么样**。分三组看。
+
+#### ① 唯一的对外入口：`forward` 按 mode 分发
+
+基类**实现了** `forward()`（不是抽象方法），子类通常不覆盖它。它做的事只有一件——**按 `forward_batch.forward_mode` 把调用分派到三个钩子之一**：
+
+| forward_mode | 分派到 | 说明 |
+|---|---|---|
+| `is_idle()` | 直接返回空张量 | 不进 kernel，返回 `[q.shape[0], tp_q_head_num * v_head_dim]` 的空结果 |
+| `is_decode()` | `forward_decode` | 每请求 1 个新 token |
+| `is_mixed()` 且 `is_npu()` | `forward_mixed` | prefill+decode 混合批，**仅昇腾走这条**（见 §六） |
+| 其余（extend / prefill / target_verify…） | `forward_extend` | 每请求 N 个新 token |
+
+`forward_decode` / `forward_extend` / `forward_mixed` 在基类里都是 `raise NotImplementedError()`，**这三个才是子类真正要填的空**。
+
+> 这个设计的价值：**「什么时候该走哪条路」只在基类写一次**。子类只管实现「怎么算」，不用各自重复判断 mode，也就不会出现「A backend 认为 target_verify 走 decode、B backend 认为走 extend」这种分歧。
+
+#### ② forward 之前：metadata 三方法与 CUDA Graph
+
+**元数据（metadata）是「说明数据怎么读」的描述信息**——每条序列多长、它的 KV 散落在池子的哪些位置、每条请求的 query 从第几行开始。kernel 本身只认指针和长度，所有「哪块内存属于谁」的信息都得提前算好递进去。这就是每次 forward 前必须先 `init_forward_metadata` 的原因。
+
+基类把这件事拆成**三个方法**，注释里明写这是一套 "Forward-data init contract"：
+
+| 方法 | 何时跑 | 约束 |
+|---|---|---|
+| `init_forward_metadata(fb)` | **eager 入口** | 默认实现 = 依次调下面两个；子类可覆盖以保留独立的 eager 主体 |
+| `init_forward_metadata_out_graph(fb, in_capture=False)` | **`with graph.capture():` 之外** | 放 host 侧操作、动态 shape、非图可录制逻辑。捕获时传 `in_capture=True`，重放/eager 传 `False` |
+| `init_forward_metadata_in_graph(fb)` | **`with graph.capture():` 之内** | 只能放**静态 shape 的 GPU 算子**；注释里给了 lint 契约——**不许调 `.item()` / `.cpu()` / `.tolist()` / 动态 shape 的 `torch.empty()`** |
+
+**为什么非拆不可**：CUDA Graph 是「把一串 GPU 操作录下来整体重放」，**能被录进去的只有 GPU 算子，而且 shape 必须固定**。`.item()` 这类要把值同步回 CPU 的操作根本录不进图；`torch.empty(动态大小)` 每次地址不同，录下来的指针下次就失效了。所以框架强制你把 metadata 准备工作**按「能不能录进图」切成两半**，放错地方会在捕获时炸或者更糟——重放时读到上一批的陈旧数据。
+
+> 基类注释同时说明：旧的 `init_forward_metadata_capture_cuda_graph` / `..._replay_cuda_graph` 两个覆盖点**已完全废弃并从 ABC 中移除**，树外 backend 必须迁移到 `init_forward_metadata_out_graph(fb, in_capture)`。这是本版本的一个 API 断裂点，读老资料时注意。
+
+#### ③ 能力声明：类属性开关
+
+基类还留了几个**类属性**，子类靠改这些值声明自己的能力，框架据此调整调用方式——**不需要框架 `isinstance` 判断具体类型**：
+
+| 属性 / 方法 | 默认 | 含义 |
+|---|---|---|
+| `needs_cpu_seq_lens` | `True` | 是否需要 `seq_lens_cpu` / `seq_lens_sum`。**Triton 声明为 `False`**（重放时从预分配 buffer 重建，不读 CPU 侧长度），框架就能省掉一次 GPU→CPU 同步 |
+| `supports_ragged_verify_graph` | `False` | 是否支持 ragged verify 图 |
+| `use_captured_forward_metadata_for_breakable_cuda_graph` | `False` | 捕获的图是否依赖 metadata 张量地址；为 `True` 的 backend 需在每次重放前**就地刷新**捕获时那个对象的动态字段 |
+| `support_triton()` | 返回 `True` | 该 backend 是否兼容 Triton 路径。**TorchNative 覆盖为 `False`** |
+| `get_cuda_graph_seq_len_fill_value()` | `NotImplementedError` | padding 位置的 seq_len 填什么（通常 0 或 1） |
+| `get_indexer_metadata(...)` | 返回 `None` | 稀疏注意力 indexer 元数据，`None` = 不支持 |
+
+> **这是很典型的 "capability flags" 模式**：把「我支持什么」编码成默认值友好的属性，新 backend 只声明差异项。和 §4.2 驱逐策略的 `get_priority`、§4.5 的 `set_kv_buffer` 是同一路数——**把变化点收进窄接口，调用方零分支**。
+
+### 5.3 Triton Backend
+
+`TritonAttnBackend`，全 Triton DSL 手写 kernel，NVIDIA / AMD 通吃。它是**三者里 metadata 结构最显式**的——因为 kernel 是自己写的，索引怎么排完全由自己定。
+
+#### 核心三个索引数组
+
+| 数组 | 内容 |
+|---|---|
+| `kv_indices` | 所有请求的 KV 槽位号**拉成一个长条**（一维数组） |
+| `kv_indptr` | **段落分界点**：第 i 个请求的 KV 是 `kv_indices[kv_indptr[i] : kv_indptr[i+1]]` |
+| `qo_indptr` | extend 时每个请求带 N 个新 token 的 Q，记录**不同请求的 Q 分界点** |
+
+> 这是经典的 **CSR（压缩稀疏行）布局**：变长的一批序列，用「长条数据 + 分界点数组」表示，避免 padding 到等长浪费显存。`indptr` 长度恒为 `bs + 1`，由 `torch.cumsum(seq_lens)` 填出来，所以第 i 段的长度就是相邻两个分界点之差。
+
+除了这三个，`ForwardMetadata` 这个 dataclass 里还有：`attn_logits` / `attn_lse`（split-KV 的中间结果与 log-sum-exp）、`num_kv_splits`（每条序列切几段并行）、`custom_mask` / `mask_indptr`（自定义掩码，同样是 CSR）、以及一整套 `window_*` 前缀的滑动窗口专用副本。
+
+#### 构造函数做的四件事
+
+1. **拿到三个池子的引用**：`req_to_token_pool`（§4.5 的索引表）、`token_to_kv_pool`（真显存）、`token_to_kv_pool_allocator`（分配器）。注释点明是「构造时抓住，这样 `ForwardBatch` 上对应字段被删了也不受影响」。
+2. **注册 kernel 函数**：懒加载 `decode_attention_fwd` / `extend_attention_fwd` / `extend_attention_fwd_unified` / `verify_splitkv_fwd`，并统一套 `torch.compiler.disable`。**懒加载是为了避免过早初始化 CUDA context**。
+3. **预分配 indptr buffer**：`kv_indptr`、`window_kv_indptr`、`qo_indptr`、`mask_indptr`，形状都是 `(max_bs + 1,)`。**预分配是给 CUDA Graph 用的**——重放时必须往同一块地址写。
+4. **参数配置**：滑动窗口、MLA、DCP（`dcp_size` / `dcp_rank`）、投机解码（`num_draft_tokens` / `speculative_num_steps` / `topk`），以及 `max_kv_splits` 的一堆按卡型修正。
+
+#### `init_forward_metadata`：按 mode 分三条路
+
+Triton **覆盖了** eager 入口（不用基类默认的两段式），内部按 mode 分支：
+
+- **decode / idle**：建 `kv_indptr` + `kv_indices`（`torch.cumsum` 填分界点，再用 Triton kernel `create_flashinfer_kv_indices_triton` 并行填长条），分配 `attn_logits` / `attn_lse`，算 `num_kv_splits`；此路 `qo_indptr = None`（decode 每请求恒 1 个 token，不需要 Q 分界）。
+- **target_verify**（投机解码验证）：`qo_indptr` 用 `torch.arange` 按 `num_draft_tokens` 等步长生成——因为每条请求的草稿 token 数是**一样的**，不需要 cumsum。
+- **extend / prefill**：`qo_indptr` 由各请求的新增 token 数 cumsum 得到。
+
+#### `forward_extend` 四步
+
+1. **准备输出 buffer**（复用 `forward_batch._attn_output`，或按 `qk_head_dim != v_head_dim` 决定新建形状）
+2. **存 KV cache**（`save_kv_cache` 时调 `_set_kv_buffer`；MLA 与带 `k_scale` 的路径要先 `clone()` 再缩放，避免 kernel 里用到的 `k` 被就地改掉）
+3. **选择 kv_indptr**（滑动窗口层走 `window_kv_indptr`，全注意力层走 `kv_indptr`）
+4. **调 Triton kernel**（DCP 走 `_forward_extend_dcp`，确定性模式走 `_forward_extend_unified` 单阶段 kernel，否则走标准 `extend_attention_fwd`）
+
+`forward_decode` 同理，换成 `decode_attention_fwd`，并把 `num_kv_splits` 交给 kernel 做 split-KV 并行。
+
+### 5.4 FlashInfer Backend
+
+**FlashInfer 是 CMU 出的推理 kernel 库**（非 SGLang 自研），SGLang 在 NVIDIA 上默认用它。它的形态和 Triton 有个根本区别：**不是「一个函数调一次 kernel」，而是 wrapper 对象 + plan / run 两阶段**。
+
+#### plan / run 两阶段
+
+| 阶段 | 干什么 | 对应 SGLang 的调用点 |
+|---|---|---|
+| **plan** | **CPU 侧大量准备工作**：解析 indptr、规划 tile 划分与调度、算 workspace 切分、挑 kernel 变体 | `init_forward_metadata` / `init_forward_metadata_out_graph` |
+| **run** | 真正发 kernel 算 | `forward_extend` / `forward_decode` |
+
+**为什么要分**：这些规划工作**只跟 batch 的形状有关，跟 K/V 的数值无关**。一次 forward 要过几十个 attention 层，如果每层都重算一遍调度方案就是纯浪费——plan 一次，几十层 run 复用。这也解释了为什么 plan 在 SGLang 侧被塞进 metadata 阶段：**它天然属于「每批一次」而不是「每层一次」**。
+
+#### 构造函数做的四件事
+
+1. **预分配 workspace**：一整块 `torch.uint8` 大 buffer（大小由 `SGLANG_FLASHINFER_WORKSPACE_SIZE` 控制），FlashInfer 内部所有临时空间都从这里切。默认走全局共享 buffer（`get_buffer("flashinfer_workspace")`），避免多 backend 各占一块。
+2. **预分配 `kv_indptr` / `qo_indptr` / `kv_last_page_len` buffer**：同样是 `(max_bs + 1,)`，同样为 CUDA Graph 的地址稳定。注意这里是**每个 wrapper 一份**（`for _ in range(self.num_wrappers)`）。
+3. **创建 wrapper 实例**：三类——`BatchPrefillWithRaggedKVCacheWrapper`（ragged，KV 未入页表时用）、`BatchPrefillWithPagedKVCacheWrapper`（paged，prefill 与 verify 各一套）、`BatchDecodeWithPagedKVCacheWrapper`（decode）。滑动窗口模型会开两套（SWA 层 + 全注意力层各一），`num_wrappers` 由此而来。
+4. **创建 indices updater**：`FlashInferIndicesUpdaterDecode` / `FlashInferIndicesUpdaterPrefill`，**这是把 SGLang 的 KV cache 索引表翻译成 FlashInfer plan 输入的适配层**。
+
+> **这个适配层是理解 FlashInfer 集成的关键**：SGLang 内部的表示是 `req_to_token` 二维表 + 槽位号（§4.5），FlashInfer 要的是它自己那套 paged KV 布局参数。updater 就是这道翻译。它还按场景分了 `update_single_wrapper` / `update_sliding_window` / `update_cross_attention` 三条路。
+
+#### `plan_stream`：把 plan 挪到独立 CUDA stream
+
+`attention_registry.py` 里创建 flashinfer backend 时有一段：**只在 `speculative_algorithm == "EAGLE"` 时**，给 runner 挂一个 `plan_stream_for_flashinfer = torch.cuda.Stream()`。
+
+用意是投机解码下 plan 要跑很多次（草稿模型多步 + 验证），把 plan 放到**独立 stream** 上，就能和主 stream 的计算重叠，而不是串在关键路径上。实际使用点在 `speculative/eagle_worker_v2.py`（`plan_stream_ctx`），靠 `wait_stream` 建立依赖。**思路和 §三 `event_loop_overlap` 用多 stream 藏调度开销完全一致——能并行的准备工作就别排在算子前面。**
+
+> ⚠️ 存疑：`plan_stream` 这条只在 EAGLE 投机解码路径下启用，非投机场景不会创建。笔记原文单列了「关于 plan_stream」但没写结论，我按源码补了上面这段；如果你当时看的是别处的用法（比如 `dflash_info_v2.py` 里的 `_get_overlap_plan_stream`），告诉我再改。
+
+### 5.5 TorchNative Backend
+
+`TorchNativeAttnBackend`，全文仅 401 行，是三者里**最简单也最慢**的一个：**逐请求 Python 循环，每次 gather 一个请求的 KV，调 PyTorch 自带的 `scaled_dot_product_attention`（SDPA）**。源码里两处循环都挂着 `TODO: this loop process a sequence per iter, this is inefficient`。
+
+它的价值不在性能，而在**没有任何编译期依赖**——没有 Triton、没有 CUDA kernel、没有第三方库，CPU 上也能跑。所以它是**兜底与对拍基准**：新硬件还没适配 kernel 时先用它跑通，或者怀疑某个快 kernel 算错时用它对结果。
+
+#### 结构
+
+1. **构造函数**：只抓 `req_to_token_pool` / `token_to_kv_pool` 两个引用，判断是否 SWA 池。**没有 workspace、没有预分配 buffer、没有 kernel 注册**——对比 5.3 / 5.4 的四步构造，差距一目了然。
+2. **`init_forward_metadata`**：几乎是空的，只做一件事——若启用了 SWA KV 池，把 `out_cache_loc` 从 full 池坐标翻译成 SWA 池坐标存进 `self.swa_out_cache_loc`。**它没有 indptr、没有 indices**，因为循环里现取现用，不需要预先摊平。
+3. **`forward_extend`**：分配输出 → 决定写去哪（cross-attention 用 `encoder_out_cache_loc`，否则 `out_cache_loc`）→ 存 KV cache → 判断是不是 GQA（`tp_q_head_num != tp_k_head_num`）→ 调 `_run_sdpa_forward_extend`。**注意这是个普通 Python 函数，不是 kernel。**
+4. **`_run_sdpa_forward_extend`**：SDPA 要求 `(H, N, D)` 排布，所以先 `movedim` 把 head 维提前；然后逐请求循环——切出该请求的 Q → **造一个带空位前缀的完整 Q**（`per_req_query_redudant`，前 `prefill_seq_len_q` 行留空）→ 用 `req_to_token[req_pool_idx, start_kv:end_kv]` 拉出该请求的 K/V → dtype 对齐 → 处理滑动窗口 mask → 算 attention → **只保留新 token 那部分**写回输出。
+5. **`_run_sdpa_forward_decode`**：同样的循环，但 `seq_len_q` 恒为 1，且不需要造冗余 Q。
+
+> **「造一个带空位前缀的完整 Q」这步值得停一下**：extend 时该请求已有 `prefix_len` 个历史 token 的 KV，新来 `extend_len` 个 Q。SDPA 的 `is_causal=True` 是按「Q 和 K 等长且对齐」推导掩码的，所以这里把 Q 补齐到和 KV 等长（前面留空），让因果掩码算对，**算完再把前缀那段扔掉**。这是用「多算一些 + 事后裁剪」换掉自定义掩码的复杂度——**和 §八 Detokenizer 用「全量减上下文」取增量是同一种思路：宁可重复计算，也不维护复杂状态。**
+
+另外它覆盖了 `support_triton()` 返回 `False`，向框架声明「别给我走 Triton 路径」——这正是 5.2 ③ 那套能力声明的实例。
+
+### 5.6 三者对比
+
+| 维度 | **Triton** | **FlashInfer** | **TorchNative** |
+|---|---|---|---|
+| kernel 来源 | SGLang 自写 Triton DSL | 第三方库（CMU） | PyTorch 内置 SDPA |
+| 调用形态 | 函数式，直接调 kernel | **wrapper 对象 + plan/run 两阶段** | 普通 Python 函数 |
+| 批处理方式 | 整批并行（CSR 索引） | 整批并行（paged 布局） | **逐请求 Python 循环** |
+| metadata 复杂度 | 高：`kv_indptr` / `kv_indices` / `qo_indptr` + 十余个字段 | 高：藏在 wrapper 里，靠 IndicesUpdater 翻译 | **几乎没有** |
+| 构造函数负担 | 三池引用 + kernel 注册 + 预分配 buffer + 参数配置 | workspace + indptr buffer + wrapper + updater | 只抓两个池引用 |
+| 预分配 workspace | 无（按需 `torch.empty`） | **有，一整块大 buffer** | 无 |
+| CUDA Graph | 支持，`needs_cpu_seq_lens=False` | 支持，wrapper 分捕获/重放两套 metadata | 不涉及 |
+| 硬件 | NVIDIA + AMD | NVIDIA 为主 | 任意（含 CPU） |
+| `support_triton()` | `True` | `True` | **`False`** |
+| 性能 | 快，可跨厂商 | **最快**（NVIDIA 上默认） | **最慢**（源码自带 TODO） |
+| 适用 | 跨厂商 / 需要改 kernel | 生产环境 NVIDIA | 兜底、对拍、新硬件过渡 |
+
+**三条可以带走的结论：**
+
+1. **复杂度和性能是正相关的**——TorchNative 只有 401 行、构造函数三行，代价是逐请求循环；FlashInfer 快，代价是 workspace、wrapper、两阶段、还要写一个 IndicesUpdater 适配层。**没有又快又简单的选项。**
+2. **越快的 backend，越多的工作被挪到了 forward 之外**：TorchNative 的准备工作几乎为零、全在 forward 里现算；Triton 把索引摊平到 metadata 阶段；FlashInfer 更进一步，把调度规划做成独立的 plan 阶段、甚至挪到独立 stream。**优化的方向始终是「把每层重复的活儿提到每批一次」。**
+3. **基类的抽象经受住了三种极端不同的实现**：一个是第三方库对象、一个是自写 kernel、一个是 Python 循环，但它们对上层暴露的都是同一个 `forward()` + 三个 metadata 钩子。这就是 §六 里国产卡能靠 `hardware_backend/<device>/` + 注册表接进来的前提。
+
 ## 六、国产 GPU/NPU 适配文件清单
 
 > 基于本地仓库 `d:/project/sglang`（commit `fdebc938f7`，release/v0.5.16 线）实扫。**树内**只有华为昇腾和摩尔线程两家；其余国产芯片走**树外插件**路径。
@@ -436,5 +569,5 @@ flowchart LR
 ## 备注
 
 - 本文基于对 SGLang 的源码走读笔记整理，聚焦主干流程；**具体函数名 / 行号可能随 SGLang 版本变化，以实际代码为准**。
-- **版本基准**：§四（RadixCache 与 KV 内存池）与 §六（国产 GPU/NPU 适配清单）的实现细节均实扫自本地仓库 `d:/project/sglang`，commit `fdebc938f7`（release/v0.5.16 线）。
+- **版本基准**：§四（RadixCache 与 KV 内存池）、§五（注意力 Backend）与 §六（国产 GPU/NPU 适配清单）的实现细节均实扫自本地仓库 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）。
 - 架构图引自 [Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) 的 SGLang code-walk-through。
