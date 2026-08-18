@@ -269,7 +269,9 @@ TorchNativeAttnBackend:
 	逐请求循环，每次gather一个请求的kv
 	1.构造函数：
 	2.init_forward_metadata:如果启用了SWA kv pool，把out_cache_loc从full池坐标翻译为SWA池坐标
-	3.forward_extend:分配输出-》决定写去哪-》存kv cache-》决定是不是GQA-》
+	3.forward_extend:分配输出-》决定写去哪-》存kv cache-》决定是不是GQA-》调用_run_sdpa_forward_extend(python函数，不是kernel)
+	4._run_sdpa_forward_extend：SDPA要求（H、N、D）排布-》循环体，逐请求处理-》决定要处理多少个token-》切出该请求的Q-》造一个包含空位前缀的完整的Q-》拉这个请求的k、v-》dtype对齐-》处理sliding window mask-》attention-》保留新token部分
+	5._run_sdpa_forward_decode
 ## 六、国产 GPU/NPU 适配文件清单
 
 > 基于本地仓库 `d:/project/sglang`（commit `fdebc938f7`，release/v0.5.16 线）实扫。**树内**只有华为昇腾和摩尔线程两家；其余国产芯片走**树外插件**路径。
