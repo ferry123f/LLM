@@ -197,3 +197,23 @@
 - 版本基准从「§四与§六」扩为「§四、§五与§六」；`release/v0.5.16 线` 改为准确的 `tag v0.5.16`
 - raw 未涉及；`assets/_inbox` 本次为空，无需清理
 - 更新 index.md 摘要与 Updated 日期 2026-08-13 → 2026-08-18
+
+## [2026-08-18] normalize | SGLang §五 补 Ragged KV 与 Paged KV 的区别
+- 用户读 §5.5 时注意到 FlashInfer 同时持有 ragged 与 paged 两种 wrapper，要求在合适位置补两者区别
+- **落点选择**：没有塞进 FlashInfer 小节，而是**新建 §5.2「前置概念：Ragged KV 与 Paged KV」**置于基类之前——因为这是「两种 KV 内存布局」的通用概念（Triton 的 CSR 也是 ragged），不是 FlashInfer 私有实现细节；原 5.2～5.6 顺延为 5.3～5.7
+- **新增 §5.2 内容**（均实扫核对，commit `fdebc938f7` / tag `v0.5.16`）：
+  - 两种布局 5 维对比表（物理形态 / 定位方式 / 间接层数 / 能否复用 / 类比）——核心是 **ragged 零间接、paged 过一层页表**
+  - 点明 **ragged 就是 §5.4 Triton 的 CSR 布局**，并区分「ragged」一词的两层用法（数据布局 vs FlashInfer wrapper 名）
+  - **为什么必须两者兼用**：extend 时 KV 有两个来源——历史前缀（早已在池中、可被共享，必然 paged）与本次新 token（刚算出的连续张量，天然 ragged）；只用 paged 会多一次「写入+间接寻址」往返，只用 ragged 则 RadixCache 前缀共享失效
+  - **代价与解法**：两半 softmax 分母不同不能直接相加，需各返回 LSE 再加权合并（`forward_return_lse` / `merge_state`）；点明这与 Triton split-KV（`attn_logits`/`attn_lse`/`num_kv_splits`）是同一套在线 softmax 机制
+- **§5.5 FlashInfer 内新增「extend 时 ragged 与 paged 如何分工」**：
+  - `use_ragged` 的成立条件（非确定性模式 且 不在 piecewise cuda graph 且 未设 `SGLANG_FLASHINFER_USE_PAGED`；多模态与 multi-item scoring 强制 `False`）
+  - **最硬的实证**：`update_single_wrapper` 里 `paged_kernel_lens` 在 `use_ragged=True` 时取 `prefix_lens`、否则取 `seq_lens`——一行代码即证明「开 ragged 时 paged 只管旧的那半截」
+  - 两条子路径：`extend_no_prefix=True` 时只调 ragged 一次；有前缀命中时两 wrapper 各算一半再 `_safe_merge_state` 合并
+  - **点出 `causal` 取值分裂**：ragged 半 `causal=True`（新 token 互相看，存在未来需遮）、paged 半 `causal=False`（新 token 看历史，不存在未来，遮反而错）——用以说明两半是数学上精确切开的
+  - 补 **KV 写入时机差异**：`use_ragged=False` 必须先 `set_kv_buffer` 再算（paged wrapper 要从池中读新 token KV）；`use_ragged=True` 则算完才写（写池仅为后续请求留缓存）
+- 细化 §5.5 构造函数第 3 步的 wrapper 清单，补 **decode 只有 paged wrapper** 及其原因（每步仅加 1 token，无「一批新 token」可言）
+- §5.7 对比表新增「KV 布局」一行
+- 修正 §六 引言遗留的 `release/v0.5.16 线` → `tag v0.5.16`，与文末备注统一
+- 全文 573 → 643 行；§五 交叉引用（§5.2→§5.5/§5.4、§4.5、§三、§六、§八）全部复核自洽
+- 更新 index.md 摘要（补 ragged/paged 要点）

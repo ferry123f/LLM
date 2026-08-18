@@ -245,7 +245,42 @@ flowchart LR
 
 注册机制在 `attention_registry.py`：一个全局字典 `ATTENTION_BACKENDS` + 装饰器 `@register_attention_backend("<名字>")`，把**工厂函数**（不是类）挂进去。工厂函数收 `runner`，可以在建对象前做额外准备——例如 flashinfer 的工厂会先判断 `runner.use_mla_backend` 决定返回 `FlashInferAttnBackend` 还是 `FlashInferMLAAttnBackend`，**同一个 `--attention-backend flashinfer` 落到两个类**。
 
-### 5.2 基类 `AttentionBackend` 定的契约
+### 5.2 前置概念：Ragged KV 与 Paged KV
+
+后面 §5.5 会看到 FlashInfer 同时持有 `BatchPrefillWithRaggedKVCacheWrapper` 和 `BatchPrefillWithPagedKVCacheWrapper` 两种 wrapper。**这不是新旧两套实现，而是两种 KV 内存布局，对应两种数据来源**，先把区别讲清楚。
+
+#### 两种布局
+
+| | **Ragged（不规则）** | **Paged（分页）** |
+|---|---|---|
+| 物理形态 | **一整块连续内存**，多条变长序列首尾相接 | **切成固定大小的页**，页在显存里离散分布 |
+| 定位方式 | `indptr` 分界点直接切片，第 i 条是 `[indptr[i] : indptr[i+1]]` | 先查**页表**拿到页号列表，再逐页取 |
+| 间接层数 | **零**——指针加偏移就是数据 | **一层**——必须过页表（即 §4.5 的 `req_to_token`） |
+| 能否复用 | 不能，本次批次的临时数据 | **能**，这正是 RadixCache 前缀共享的基础 |
+| 类比 | 一条长胶卷，剪刀按刻度剪 | 图书馆借书，先查索书号再去架上取 |
+
+> **Ragged 就是 §5.4 讲的 CSR 布局**（长条数据 + `indptr` 分界点）。所以「ragged」这个词在源码里有两层用法：形容**数据布局**（变长序列紧凑拼接、不 padding），以及形容 **FlashInfer 那个专门吃这种布局的 wrapper**。
+
+#### 为什么要有两种
+
+关键在于**一次 extend（prefill）里，KV 有两个来源**：
+
+- **历史前缀的 KV** —— 早就算好躺在 KV 池里，可能还被别的请求共享（§四 RadixCache）。它必然是 **paged** 的：分页才能让不同请求复用同一批物理页，不然没法共享。
+- **本次新 token 的 KV** —— 刚刚在这一层算出来，是一块崭新的连续张量。它天然是 **ragged** 的：一批请求的新 token 拼在一起，各自长度不同。
+
+**如果只用 paged**：新算出的 K/V 得先写进 KV 池、建好页表，再让 kernel 绕一层页表读回来。可它明明就在手边的连续内存里——**多了一次写入 + 一次间接寻址**。
+
+**如果只用 ragged**：历史前缀就没法共享了，每个请求都得把自己的前缀物化成连续内存，RadixCache 的意义直接归零。
+
+所以两者不是二选一，而是**分工**：ragged 处理「新的、临时的、连续的」，paged 处理「旧的、共享的、离散的」。
+
+#### 代价：算完要合并
+
+分开算的代价是**两次 attention 的结果不能直接相加**——softmax 的分母是全局的。标准做法是各自返回 **LSE（log-sum-exp）**，再按 LSE 把两半加权合并，数学上等价于一次完整的 attention。源码里对应 `forward_return_lse()` 与 `merge_state()`，这也是 FlashAttention 那套在线 softmax 的同一套机制。
+
+> 这个「分块算 + 用 LSE 合并」是 attention 优化里的通用手法，§5.4 Triton 的 split-KV（`attn_logits` / `attn_lse` / `num_kv_splits`）用的也是它——**把一条长 KV 切成几段并行算，再合并**。理解了这里，那几个字段就不用再单独记了。
+
+### 5.3 基类 `AttentionBackend` 定的契约
 
 基类在 `base_attn_backend.py`，是个 `ABC`，只有约 260 行，但它规定了**所有 backend 必须长成什么样**。分三组看。
 
@@ -295,7 +330,7 @@ flowchart LR
 
 > **这是很典型的 "capability flags" 模式**：把「我支持什么」编码成默认值友好的属性，新 backend 只声明差异项。和 §4.2 驱逐策略的 `get_priority`、§4.5 的 `set_kv_buffer` 是同一路数——**把变化点收进窄接口，调用方零分支**。
 
-### 5.3 Triton Backend
+### 5.4 Triton Backend
 
 `TritonAttnBackend`，全 Triton DSL 手写 kernel，NVIDIA / AMD 通吃。它是**三者里 metadata 结构最显式**的——因为 kernel 是自己写的，索引怎么排完全由自己定。
 
@@ -335,7 +370,7 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 
 `forward_decode` 同理，换成 `decode_attention_fwd`，并把 `num_kv_splits` 交给 kernel 做 split-KV 并行。
 
-### 5.4 FlashInfer Backend
+### 5.5 FlashInfer Backend
 
 **FlashInfer 是 CMU 出的推理 kernel 库**（非 SGLang 自研），SGLang 在 NVIDIA 上默认用它。它的形态和 Triton 有个根本区别：**不是「一个函数调一次 kernel」，而是 wrapper 对象 + plan / run 两阶段**。
 
@@ -352,10 +387,44 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 
 1. **预分配 workspace**：一整块 `torch.uint8` 大 buffer（大小由 `SGLANG_FLASHINFER_WORKSPACE_SIZE` 控制），FlashInfer 内部所有临时空间都从这里切。默认走全局共享 buffer（`get_buffer("flashinfer_workspace")`），避免多 backend 各占一块。
 2. **预分配 `kv_indptr` / `qo_indptr` / `kv_last_page_len` buffer**：同样是 `(max_bs + 1,)`，同样为 CUDA Graph 的地址稳定。注意这里是**每个 wrapper 一份**（`for _ in range(self.num_wrappers)`）。
-3. **创建 wrapper 实例**：三类——`BatchPrefillWithRaggedKVCacheWrapper`（ragged，KV 未入页表时用）、`BatchPrefillWithPagedKVCacheWrapper`（paged，prefill 与 verify 各一套）、`BatchDecodeWithPagedKVCacheWrapper`（decode）。滑动窗口模型会开两套（SWA 层 + 全注意力层各一），`num_wrappers` 由此而来。
+3. **创建 wrapper 实例**：三类——
+   - `BatchPrefillWithRaggedKVCacheWrapper`（**ragged**，吃手边那块连续的新 K/V，只建一个）
+   - `BatchPrefillWithPagedKVCacheWrapper`（**paged**，吃 KV 池里的历史前缀；prefill 与 verify 各一套）
+   - `BatchDecodeWithPagedKVCacheWrapper`（decode，**只有 paged** —— decode 每步只加 1 个 token，没有「一批新 token」可言，全部 KV 都在池子里）
+
+   滑动窗口模型会开两套（SWA 层 + 全注意力层各一），`num_wrappers` 由此而来。
 4. **创建 indices updater**：`FlashInferIndicesUpdaterDecode` / `FlashInferIndicesUpdaterPrefill`，**这是把 SGLang 的 KV cache 索引表翻译成 FlashInfer plan 输入的适配层**。
 
 > **这个适配层是理解 FlashInfer 集成的关键**：SGLang 内部的表示是 `req_to_token` 二维表 + 槽位号（§4.5），FlashInfer 要的是它自己那套 paged KV 布局参数。updater 就是这道翻译。它还按场景分了 `update_single_wrapper` / `update_sliding_window` / `update_cross_attention` 三条路。
+
+#### extend 时 ragged 与 paged 如何分工
+
+§5.2 讲了概念，这里是它在源码里的落地——**`forward_extend` 有两条互斥的路，由 `forward_metadata.use_ragged` 决定**。
+
+`use_ragged` 在 `init_forward_metadata` 里算出，条件是「非确定性模式 且 不在 piecewise cuda graph 中 且 未强制 `SGLANG_FLASHINFER_USE_PAGED`」；多模态与 multi-item scoring 场景强制为 `False`。
+
+**最直接的证据在 `update_single_wrapper` 里**——同一个变量 `paged_kernel_lens` 喂给 paged wrapper，两条路给的值完全不同：
+
+| | `paged_kernel_lens` 取值 | 含义 |
+|---|---|---|
+| `use_ragged=True` | **`prefix_lens`** | paged wrapper **只负责历史前缀** |
+| `use_ragged=False` | **`seq_lens`** | paged wrapper 负责**整条序列**（前缀 + 新 token） |
+
+这一行就把分工说清了：**开 ragged 时，paged 只管旧的那半截；不开 ragged 时，新 K/V 先写进池子，paged 一口吃下全长。**
+
+**`use_ragged=True` 的完整流程**，还要再分一种情况：
+
+- **纯新 prompt（`extend_no_prefix=True`，即没有任何前缀命中）**：根本没有历史 KV，**只调 ragged wrapper 一次就完事**，`causal=True`。
+- **有前缀命中**（常态）：**两个 wrapper 各算一半再合并**——
+  1. `prefill_wrapper_ragged.forward_return_lse(q, k, v, causal=True)` → 新 token 之间的 attention，`causal=True` 因为新 token 内部要遵守因果序
+  2. `prefill_wrapper_paged.forward_return_lse(q, kv_cache, causal=False)` → 新 token 对历史前缀的 attention，**`causal=False` 因为前缀全都在「过去」，每个新 token 都能看到全部前缀，不需要再遮**
+  3. `_safe_merge_state(o1, s1, o2, s2)` 按 LSE 合并两半
+
+> **两个 `causal` 取值不同，这是我觉得这段最漂亮的地方**：因果掩码的作用是「不许看未来」。ragged 那半是新 token 互相看，**存在未来**，必须遮；paged 那半是新 token 看历史，**不存在未来**，遮反而错。同一次 attention 被拆成两半后，掩码语义也随之分裂——**这正说明这两半在数学上是被精确切开的，不是随便分块。**
+
+另外注意 KV 写入时机的差异：`use_ragged=False` 时**必须先 `set_kv_buffer` 再算**（paged wrapper 要从池子里读新 token 的 KV，不写进去就读不到）；`use_ragged=True` 时新 K/V 直接以张量形式喂给 ragged wrapper，`set_kv_buffer` 挪到**算完之后**才做——写池子只是为了给后续请求留缓存，不影响本次计算。
+
+**这就是 ragged 路径省下的东西**：一次「写进池子再绕页表读回来」的往返。
 
 #### `plan_stream`：把 plan 挪到独立 CUDA stream
 
@@ -365,7 +434,7 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 
 > ⚠️ 存疑：`plan_stream` 这条只在 EAGLE 投机解码路径下启用，非投机场景不会创建。笔记原文单列了「关于 plan_stream」但没写结论，我按源码补了上面这段；如果你当时看的是别处的用法（比如 `dflash_info_v2.py` 里的 `_get_overlap_plan_stream`），告诉我再改。
 
-### 5.5 TorchNative Backend
+### 5.6 TorchNative Backend
 
 `TorchNativeAttnBackend`，全文仅 401 行，是三者里**最简单也最慢**的一个：**逐请求 Python 循环，每次 gather 一个请求的 KV，调 PyTorch 自带的 `scaled_dot_product_attention`（SDPA）**。源码里两处循环都挂着 `TODO: this loop process a sequence per iter, this is inefficient`。
 
@@ -383,7 +452,7 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 
 另外它覆盖了 `support_triton()` 返回 `False`，向框架声明「别给我走 Triton 路径」——这正是 5.2 ③ 那套能力声明的实例。
 
-### 5.6 三者对比
+### 5.7 三者对比
 
 | 维度 | **Triton** | **FlashInfer** | **TorchNative** |
 |---|---|---|---|
@@ -396,6 +465,7 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 | CUDA Graph | 支持，`needs_cpu_seq_lens=False` | 支持，wrapper 分捕获/重放两套 metadata | 不涉及 |
 | 硬件 | NVIDIA + AMD | NVIDIA 为主 | 任意（含 CPU） |
 | `support_triton()` | `True` | `True` | **`False`** |
+| **KV 布局** | ragged（CSR）索引统一走 `kv_indices` + `kv_indptr` | **ragged + paged 双 wrapper，extend 时分算再按 LSE 合并** | 都不用，逐请求现 gather |
 | 性能 | 快，可跨厂商 | **最快**（NVIDIA 上默认） | **最慢**（源码自带 TODO） |
 | 适用 | 跨厂商 / 需要改 kernel | 生产环境 NVIDIA | 兜底、对拍、新硬件过渡 |
 
@@ -407,7 +477,7 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 
 ## 六、国产 GPU/NPU 适配文件清单
 
-> 基于本地仓库 `d:/project/sglang`（commit `fdebc938f7`，release/v0.5.16 线）实扫。**树内**只有华为昇腾和摩尔线程两家；其余国产芯片走**树外插件**路径。
+> 基于本地仓库 `d:/project/sglang`（commit `fdebc938f7`，tag `v0.5.16`）实扫。**树内**只有华为昇腾和摩尔线程两家；其余国产芯片走**树外插件**路径。
 > 注意 `xpu` 是 **Intel** 独显（`hardware_backend/xpu/__init__.py` 明写 "XPU (Intel GPU)"），**不是**昆仑芯，别看名字想当然。
 
 ### 6.1 适配的三种落点
