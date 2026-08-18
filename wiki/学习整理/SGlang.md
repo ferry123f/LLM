@@ -238,6 +238,7 @@ flowchart LR
 | **cutlass_mla** | 特定场景 | MLA 的 CUTLASS 实现 |
 | **aiter** | AMD ROCm | AMD 专用 |
 | **ascend** | Ascend NPU | 华为昇腾芯片 |
+元数据是"说明数据怎么读"的描述信息——每条序列多长、它的 KV 散落在池子的哪些位置、每条请求的 query 从第几行开始。
 Triton Backend：
 	KV_indices:所有请求的kv槽位号拉成一个长条，数组
 	 KV_indptr:段落分界点
@@ -250,9 +251,25 @@ Triton Backend：
 	init_forward_metedata（decode或idle、target verify、extend/prefill）
 	forward_extend
 		1.准备输出buffer
-		2.存
+		2.存KV cache
+		3.选择kv_indptr
+		4.调triton kernel
+	 forward_decode
 FlashInfer Backend：
-TorchNativeAttnBackend
+	FlashInfer是CMU产出的推理kernel库，有wrapper+plan/run两个阶段，plan阶段会做很多的cpu侧的准备工作
+	 构造函数：
+		 1.预分配workspace
+		 2.预分配kv_indptr/qo_indptr buffer
+		 3.创建wrapper实例
+		 4.创建indicesupdater，把sglang的kc cache表翻译成FlashInfer plan输入的适配层
+	init_forward_metadata:plan阶段（decode、target verify、extend/prefill）
+	forward_extend/forward_decode:run阶段
+	关于plan_stream
+TorchNativeAttnBackend:
+	逐请求循环，每次gather一个请求的kv
+	1.构造函数：
+	2.init_forward_metadata:如果启用了SWA kv pool，把out_cache_loc从full池坐标翻译为SWA池坐标
+	3.forward_extend:分配输出-》决定写去哪-》存kv cache-》决定是不是GQA-》
 ## 六、国产 GPU/NPU 适配文件清单
 
 > 基于本地仓库 `d:/project/sglang`（commit `fdebc938f7`，release/v0.5.16 线）实扫。**树内**只有华为昇腾和摩尔线程两家；其余国产芯片走**树外插件**路径。
