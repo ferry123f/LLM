@@ -247,7 +247,10 @@ Triton Backend：
 		 2.注册kernel函数
 		 3.预分配indptrbuffer
 		 4.参数配置（sliding window、MLA、DCP、投机解码）
-		
+	init_forward_metedata（decode或idle、target verify、extend/prefill）
+	forward_extend
+		1.准备输出buffer
+		2.存
 FlashInfer Backend：
 TorchNativeAttnBackend
 ## 六、国产 GPU/NPU 适配文件清单
