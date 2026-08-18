@@ -238,7 +238,18 @@ flowchart LR
 | **cutlass_mla** | 特定场景 | MLA 的 CUTLASS 实现 |
 | **aiter** | AMD ROCm | AMD 专用 |
 | **ascend** | Ascend NPU | 华为昇腾芯片 |
-
+Triton Backend：
+	KV_indices:所有请求的kv槽位号拉成一个长条，数组
+	 KV_indptr:段落分界点
+	 qo_indptr:extend时，每个请求带N个新token的Q，记录不同token的Q分界点
+	 构造函数：
+		 1.拿到（req_to_token_pool索引表，token_to_kv_pool真显存，allocator分配器）
+		 2.注册kernel函数
+		 3.预分配indptrbuffer
+		 4.参数配置（sliding window、MLA、DCP、投机解码）
+		
+FlashInfer Backend：
+TorchNativeAttnBackend
 ## 六、国产 GPU/NPU 适配文件清单
 
 > 基于本地仓库 `d:/project/sglang`（commit `fdebc938f7`，release/v0.5.16 线）实扫。**树内**只有华为昇腾和摩尔线程两家；其余国产芯片走**树外插件**路径。
