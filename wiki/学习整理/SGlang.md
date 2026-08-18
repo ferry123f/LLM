@@ -284,14 +284,14 @@ flowchart LR
 
 基类还留了几个**类属性**，子类靠改这些值声明自己的能力，框架据此调整调用方式——**不需要框架 `isinstance` 判断具体类型**：
 
-| 属性 / 方法 | 默认 | 含义 |
-|---|---|---|
-| `needs_cpu_seq_lens` | `True` | 是否需要 `seq_lens_cpu` / `seq_lens_sum`。**Triton 声明为 `False`**（重放时从预分配 buffer 重建，不读 CPU 侧长度），框架就能省掉一次 GPU→CPU 同步 |
-| `supports_ragged_verify_graph` | `False` | 是否支持 ragged verify 图 |
-| `use_captured_forward_metadata_for_breakable_cuda_graph` | `False` | 捕获的图是否依赖 metadata 张量地址；为 `True` 的 backend 需在每次重放前**就地刷新**捕获时那个对象的动态字段 |
-| `support_triton()` | 返回 `True` | 该 backend 是否兼容 Triton 路径。**TorchNative 覆盖为 `False`** |
-| `get_cuda_graph_seq_len_fill_value()` | `NotImplementedError` | padding 位置的 seq_len 填什么（通常 0 或 1） |
-| `get_indexer_metadata(...)` | 返回 `None` | 稀疏注意力 indexer 元数据，`None` = 不支持 |
+|                         属性 / 方法                          | 默认                    | 含义                                                                                                            |
+| :------------------------------------------------------: | --------------------- | ------------------------------------------------------------------------------------------------------------- |
+|                   `needs_cpu_seq_lens`                   | `True`                | 是否需要 `seq_lens_cpu` / `seq_lens_sum`。**Triton 声明为 `False`**（重放时从预分配 buffer 重建，不读 CPU 侧长度），框架就能省掉一次 GPU→CPU 同步 |
+|              `supports_ragged_verify_graph`              | `False`               | 是否支持 ragged verify 图                                                                                          |
+| `use_captured_forward_metadata_for_breakable_cuda_graph` | `False`               | 捕获的图是否依赖 metadata 张量地址；为 `True` 的 backend 需在每次重放前**就地刷新**捕获时那个对象的动态字段                                         |
+|                    `support_triton()`                    | 返回 `True`             | 该 backend 是否兼容 Triton 路径。**TorchNative 覆盖为 `False`**                                                          |
+|          `get_cuda_graph_seq_len_fill_value()`           | `NotImplementedError` | padding 位置的 seq_len 填什么（通常 0 或 1）                                                                             |
+|               `get_indexer_metadata(...)`                | 返回 `None`             | 稀疏注意力 indexer 元数据，`None` = 不支持                                                                                |
 
 > **这是很典型的 "capability flags" 模式**：把「我支持什么」编码成默认值友好的属性，新 backend 只声明差异项。和 §4.2 驱逐策略的 `get_priority`、§4.5 的 `set_kv_buffer` 是同一路数——**把变化点收进窄接口，调用方零分支**。
 
