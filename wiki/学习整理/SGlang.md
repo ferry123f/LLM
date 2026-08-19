@@ -642,3 +642,7 @@ flowchart LR
 - **版本基准**：§四（RadixCache 与 KV 内存池）、§五（注意力 Backend）与 §六（国产 GPU/NPU 适配清单）的实现细节均实扫自本地仓库 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）。
 - 架构图引自 [Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) 的 SGLang code-walk-through。
 custom_ops注册机制：
+把外部kernel封装成pytorch原生算子的适配层
+对模型层暴漏一个统一的算子（比如torch.ops.sglang.layernorm）,跟内置的torch.nn.functional.layer_norm用起来一样
+对torch.compile：这是我们注册的自定义算子，请当不透明黑盒处理，形状用我提供的fake_impl推。
+对硬件切换：模型代码不写if-else，注册机制在导入时根据当前平台绑到不同实现
