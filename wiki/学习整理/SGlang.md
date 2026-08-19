@@ -292,7 +292,7 @@ flowchart LR
 |---|---|---|
 | `is_idle()` | 直接返回空张量 | 不进 kernel，返回 `[q.shape[0], tp_q_head_num * v_head_dim]` 的空结果 |
 | `is_decode()` | `forward_decode` | 每请求 1 个新 token |
-| `is_mixed()` 且 `is_npu()` | `forward_mixed` | prefill+decode 混合批，**仅昇腾走这条**（见 §七） |
+| `is_mixed()` 且 `is_npu()` | `forward_mixed` | prefill+decode 混合批，**仅昇腾走这条**（见 §七 / [[国产GPU与NPU适配]]） |
 | 其余（extend / prefill / target_verify…） | `forward_extend` | 每请求 N 个新 token |
 
 `forward_decode` / `forward_extend` / `forward_mixed` 在基类里都是 `raise NotImplementedError()`，**这三个才是子类真正要填的空**。
@@ -473,7 +473,7 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 
 1. **复杂度和性能是正相关的**——TorchNative 只有 401 行、构造函数三行，代价是逐请求循环；FlashInfer 快，代价是 workspace、wrapper、两阶段、还要写一个 IndicesUpdater 适配层。**没有又快又简单的选项。**
 2. **越快的 backend，越多的工作被挪到了 forward 之外**：TorchNative 的准备工作几乎为零、全在 forward 里现算；Triton 把索引摊平到 metadata 阶段；FlashInfer 更进一步，把调度规划做成独立的 plan 阶段、甚至挪到独立 stream。**优化的方向始终是「把每层重复的活儿提到每批一次」。**
-3. **基类的抽象经受住了三种极端不同的实现**：一个是第三方库对象、一个是自写 kernel、一个是 Python 循环，但它们对上层暴露的都是同一个 `forward()` + 三个 metadata 钩子。这就是 §七 里国产卡能靠 `hardware_backend/<device>/` + 注册表接进来的前提。
+3. **基类的抽象经受住了三种极端不同的实现**：一个是第三方库对象、一个是自写 kernel、一个是 Python 循环，但它们对上层暴露的都是同一个 `forward()` + 三个 metadata 钩子。这就是国产卡能靠 `hardware_backend/<device>/` + 注册表接进来的前提（§七，详见 [[国产GPU与NPU适配]]）。
 
 ## 六、算子层：custom_op 注册与多平台分派
 
@@ -583,7 +583,7 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 
 5. **`my_lib._register_fake(op_name, fake_impl)`** —— 挂上假实现，供编译期推形状。
 
-> **第 4 步是这一节和 §七 的接头处**：注册时只绑**一个** key，也就是说这套机制产出的是**当前这台机器的**算子，不是一个多设备分派表。昇腾用 `PrivateUse1`（PyTorch 给树外设备预留的通用 key）也印证了 §七 里说的「昇腾是树内一等公民，但仍走 PyTorch 的外挂设备通道」。
+> **第 4 步是这一节和 §七 的接头处**：注册时只绑**一个** key，也就是说这套机制产出的是**当前这台机器的**算子，不是一个多设备分派表。昇腾用 `PrivateUse1`（PyTorch 给树外设备预留的通用 key）也印证了「昇腾是 SGLang 树内一等公民，但在 PyTorch 眼里仍是外挂设备」这个反差——详见 [[国产GPU与NPU适配]] §三。
 
 错误处理有个细节值得学：`RuntimeError` 里只有同时含 "Tried to register an operator" 与 "multiple times" 的才吞掉（注释说明是为**同进程多引擎**场景，例如 VERL 框架），其余照抛；而 `AttributeError` **一律重抛**——因为那通常意味着依赖没装，静默掉会变成很难查的下游报错。
 
@@ -620,7 +620,7 @@ def forward(self, *args, **kwargs):
 
 > **注意 CPU 那一支要求 `_is_cpu and _is_cpu_amx_available`**：没有 AMX 的普通 CPU 不会走 `forward_cpu`，而是一路掉到链尾的 `forward_native`。
 
-`register_oot_forward(op_cls, fn, platform_key)` 这个 classmethod 是**给树外插件的注入口**：厂商可以在自己的 pip 包里，为**已有的算子类**挂上自己平台的 forward 实现，不用改主仓库一行代码。这正是 §七 里 `SGLANG_PLATFORM` entry_point 插件机制在算子层的落点。
+`register_oot_forward(op_cls, fn, platform_key)` 这个 classmethod 是**给树外插件的注入口**：厂商可以在自己的 pip 包里，为**已有的算子类**挂上自己平台的 forward 实现，不用改主仓库一行代码。这正是 `SGLANG_PLATFORM` entry_point 插件机制在算子层的落点（见 [[国产GPU与NPU适配]] §六）。
 
 树内目前有 **21 个子类**，覆盖面能说明它的地位：激活（`SiluAndMul` / `GeluAndMul` / `NewGELU` / `ReLU2` / `QuickGELU` / `XIELU`）、归一化（`RMSNorm` / `LayerNorm` / `GemmaRMSNorm` / `Gemma3RMSNorm` / `Gemma4RMSNorm` / `RMSNormWithoutScale` / `Mixer2RMSNormGated`）、位置编码（`RotaryEmbedding` / `DualChunkRotaryEmbedding`）、MoE（`TopK` / `UnquantizedFusedMoEMethod`）、卷积（`Conv2dLayer` / `Conv3dLayer`）、以及 DSA `Indexer` 与 DSV4 `Compressor`。
 
@@ -650,96 +650,31 @@ def forward(self, *args, **kwargs):
 
 **一句话收口**：底层那条链管「**这个 kernel 长什么样、编译器怎么看它**」，`MultiPlatformOp` 管「**这台机器该用哪个 kernel、要不要为编译器让路**」。两条线正交，所以一个 `RMSNorm` 既是 `MultiPlatformOp` 子类，它的 `forward_cuda` 里又可以调用一个 `register_custom_op` 注册出来的 op。
 
-## 七、国产 GPU/NPU 适配文件清单
+## 七、国产 GPU/NPU 适配
 
-> 基于本地仓库 `d:/project/sglang`（commit `fdebc938f7`，tag `v0.5.16`）实扫。**树内**只有华为昇腾和摩尔线程两家；其余国产芯片走**树外插件**路径。
-> 注意 `xpu` 是 **Intel** 独显（`hardware_backend/xpu/__init__.py` 明写 "XPU (Intel GPU)"），**不是**昆仑芯，别看名字想当然。
+> **本节已独立成篇：[[国产GPU与NPU适配]]**——完整的昇腾 / 摩尔线程文件清单、树外插件的发现与激活流程、以及 CANN + MindSpore 那条线，都在那边。这里只留在本文语境下够用的一页纸。
 
-### 7.1 适配的三种落点
+SGLang 把硬件适配收敛到**三个落点**，看任何一家的适配都按这个顺序找：
 
-SGLang 把硬件适配收敛到三个层次，看任何一家的适配都可以按这个顺序找：
-
-| 落点 | 位置 | 作用 |
-|---|---|---|
-| **设备探测** | `srt/utils/common.py` 的 `is_npu()` / `is_musa()` / `is_hip()` / `is_xpu()` | 全局开关，决定走哪条分支 |
-| **后端实现** | `srt/hardware_backend/<device>/` | 各设备自己的 attention / MoE / 量化 / graph runner |
-| **注册分发** | `srt/layers/attention/attention_registry.py` | `@register_attention_backend("ascend")` 把实现挂到 `--attention-backend` 上 |
-
-`hardware_backend/` 目录本身就是这套设计的产物，同级并列：`gpu`（NVIDIA）、`cpu`、`mlx`（Apple）、`xpu`（Intel）、**`npu`（昇腾）**、**`musa`（摩尔线程）**。
-
-### 7.2 华为昇腾 Ascend NPU —— 适配最深
-
-树内唯一的**一等公民级**国产适配：覆盖 attention、MoE、量化、图捕获、投机解码、PD 分离、LoRA，并有独立 CI 与完整文档。
-
-**核心实现 `python/sglang/srt/hardware_backend/npu/`**
-
-| 子模块 | 文件 |
+| 落点 | 位置 |
 |---|---|
-| **attention** | `ascend_backend.py`（主）、`ascend_dsv4_backend.py`（DeepSeek V4）、`ascend_gdn_backend.py`（GDN）、`ascend_hybrid_linear_attn_backend.py`（混合线性注意力）、`ascend_torch_native_backend.py`（兜底）、`mla_preprocess.py` |
-| **graph_runner**（对标 CUDA Graph） | `npu_graph_runner.py`、`npu_cudagraph_backend.py`、`vit_npu_graph_runner.py`、`eagle_draft_npu_graph_runner.py`、`eagle_draft_extend_npu_graph_runner.py`、`multi_layer_eagle_draft_extend_npu_graph_runner.py` |
-| **MoE** | `moe/` 下 `topk.py`、`init_routing.py`、`finalize_routing.py`、`matmul.py`、`activation.py`、`hidden_states_quant.py`、`fuseep.py` |
-| **量化** | `quantization/` 下 `linear_method_npu.py`、`moe_methods.py`、`awq_kernels.py`、`gptq_kernels.py` |
-| **显存管理** | `allocator_npu.py`、`memory_pool_npu.py`、`cmo.py` |
-| **DeepSeek V4 专用** | `dsv4/` 下 `dsv4_allocator.py`、`dsv4_memory_pool.py`、`dsv4_req_to_token_pool.py`、`dsv4_common_hooks.py` |
-| **模型模块** | `modules/` 下 `deepseek_v2_attention_mla_npu.py`、`qwen_vl_processor.py`、`glm46v_processor.py` |
-| **其他** | `utils.py`、`batch_invariant_ops/npu_batch_invariant_ops.py` |
+| **设备探测** | `srt/utils/common.py` 的 `is_npu()` / `is_musa()` / `is_hip()` / `is_xpu()` |
+| **后端实现** | `srt/hardware_backend/<device>/`（同级并列 `gpu` / `cpu` / `mlx` / `xpu` / `npu` / `musa`） |
+| **注册分发** | `attention_registry.py` 的 `@register_attention_backend("ascend")` |
 
-**散落在主干里的 NPU 分支**
+更细的平台抽象在 `srt/platforms/`（`interface.py` + `device_mixin.py` 定义约 30 个方法，树内实现 `cuda.py` / `rocm.py` / `cpu.py`）。
 
-| 领域 | 文件 |
-|---|---|
-| PD 分离 | `srt/disaggregation/ascend/`：`conn.py`、`transfer_engine.py` |
-| 通信 | `srt/distributed/device_communicators/npu_communicator.py` |
-| 图编译 | `srt/compilation/npu_piecewise_backend.py` |
-| MoE 分发 | `srt/layers/moe/moe_runner/ascend.py`、`srt/layers/moe/token_dispatcher/ascend_tp.py` |
-| 量化 | `srt/layers/quantization/npu_mxfp4.py`、`npu_mxfp4_w4a4.py` |
-| LoRA | `srt/lora/backend/ascend_backend.py` |
-| torch 补丁 | `srt/utils/torch_npu_patch_utils.py` |
-| 多模态生成 | `multimodal_gen/runtime/platforms/npu.py`、`layers/attention/backends/ascend_fa.py`、`layers/quantization/mxfp4_npu.py`、`mxfp8_npu.py` |
-
-**测试 / CI / 文档 / 镜像**
-
-- 测试：`python/sglang/test/ascend/`（`e2e/` 下精度、多机、性能三套 utils；`gsm8k_ascend_mixin.py`、`test_mmlu.py`、`test_ascend_utils.py`、`test_npu_logging.py`）
-- CI：`.github/workflows/` 下 `pr-test-npu.yml`、`full-test-npu.yml`、`nightly-test-npu.yml`、`nightly-test-npu-e2e-single-node.yml`、`nightly-test-npu-e2e-multi-node.yml`、`release-docker-npu.yml`、`release-docker-npu-nightly.yml`、`diffusion-ci-gt-gen-npu.yml`
-- 镜像：`docker/npu.Dockerfile`
-- 文档：`docs_new/docs/hardware-platforms/ascend-npus/` **共 16 篇**，含快速上手、支持的模型/特性、量化、性能测试、精度评估、profiling、算子开发与调优、Ring SP 性能、FAQ、贡献指南
-
-> 昇腾适配深到有**自己的算子开发指南**和**多机 E2E nightly**，说明是有厂商团队常驻维护的，不是一次性 PR。
-
-### 7.3 摩尔线程 MUSA —— 适配较浅但自带 kernel 编译链
-
-覆盖面窄（attention + 少量算子），但特别之处是**在 `sgl-kernel` 里有独立的 C++ 编译入口**，即自带一套 kernel 构建体系。
-
-| 层 | 文件 |
-|---|---|
-| **后端实现** | `srt/hardware_backend/musa/`：`attention/flashattention_backend.py`、`kernels/topk.py`、`layers/utils/cp_utils.py`、`utils/patch_torch.py` |
-| **kernel 编译链** | `sgl-kernel/` 下 `setup_musa.py`、`pyproject_musa.toml`、`csrc/musa/`、`csrc/common_extension_musa.cc`、`include/musa/`、`include/sgl_kernel_musa_ops.h`、`python/sgl_kernel/musa.py` |
-| **多模态生成** | `multimodal_gen/runtime/platforms/musa.py` |
-| **测试** | `multimodal_gen/test/server/musa/`（1/2 卡 server 测试 + `perf_baselines_musa.json`）、`test/unit/musa/layers/`（rmsnorm、silu_and_mul）、`test/registered/musa/test_llm_server_smoke_musa.py` |
-| **CI** | `.github/workflows/pr-test-musa.yml`、`nightly-test-musa.yml` |
-| **CI 脚本** | `scripts/ci/musa/musa_install_dependency.sh`、`rename_wheels_musa.sh` |
-| **文档** | `docs_new/docs/hardware-platforms/mthreads_gpu.mdx` |
-
-注意 MUSA 的 attention 入口在 `attention_registry.py` 里是**用 `_is_musa` 全局开关拦截替换**（`if not _is_musa: ...` 那段），而不像 ascend 那样用 `@register_attention_backend` 注册成一个具名 backend。
-
-### 7.4 树外插件路径（昆仑芯等）
-
-其余国产芯片（昆仑芯、寒武纪、海光、壁仞、天数、沐曦等）在本仓库**没有任何树内代码**（实扫 `cambricon` / `biren` / `metax` / `hygon` / `iluvatar` / `tecorigin` 全部零命中）。它们通过**插件机制**在树外适配：
-
-- 机制文档：`docs_new/docs/hardware-platforms/plugin.mdx`
-- 加载器：`srt/plugins/`（`__init__.py`、`hook_registry.py`）
-- 环境变量 `SGLANG_PLATFORM` 指定 entry_point 名（文档举的例子正是 `kunlun`），命中后只调该插件的 `activate()`，其余插件跳过以免拉进无关依赖
-- 测试：`test/registered/unit/plugins/test_load_plugins.py`
-
-> 这是个**很聪明的解耦**：厂商把适配代码放自己的 pip 包里，通过 entry_point 注册，主仓库不用为每家芯片背维护成本，也不用在 import 时踩到装不上的厂商 SDK。想了解某家国产卡的支持情况，先去它自己的 fork 或 pip 包里找，别在主仓库 grep。
-
-### 7.5 一句话总结
+**三条路径的现状：**
 
 | 厂商 | 路径 | 深度 | 独立 CI | 文档 |
 |---|---|---|---|---|
-| **华为昇腾** | 树内 `hardware_backend/npu/` | 深（全栈） | ✅ 5 条 workflow | 16 篇 |
-| **摩尔线程** | 树内 `hardware_backend/musa/` + `sgl-kernel` | 浅（attention 为主）+ 自带 kernel 链 | ✅ 2 条 | 1 篇 |
-| **昆仑芯等其余** | 树外插件 `SGLANG_PLATFORM` | 不在本仓库 | ❌ | 仅机制文档 |
+| **华为昇腾** | 树内 `hardware_backend/npu/` | **深（全栈）**：attention/MoE/量化/图捕获/显存池/PD 分离/LoRA，另有 MindSpore 框架接入 | ✅ 8 条 workflow | 18 篇 + 3 子目录 |
+| **摩尔线程** | 树内 `hardware_backend/musa/` + `sgl-kernel` | 浅（attention 为主），自带 C++ kernel 编译链 | ✅ 2 条 | 1 篇 |
+| **昆仑芯等其余** | 树外插件（`sglang.srt.platforms` entry_point + `SGLANG_PLATFORM`） | 不在本仓库 | ❌ | 仅机制文档 |
+
+> `xpu` 是 **Intel** 独显（`hardware_backend/xpu/__init__.py` 明写 "XPU (Intel GPU)"），**不是昆仑芯**，别看名字想当然。
+
+**和前几节的接头**：§6.5 说 `direct_register_custom_op` 注册时按平台挑 dispatch key（昇腾 → `PrivateUse1`，摩尔线程 → `MUSA`），§6.6 的 `MultiPlatformOp` 则在构造时绑 `forward_*` 并提供 `register_oot_forward` 给树外厂商注入——**这两条正是上表「树内」与「树外」两种路径在算子层的落点**。
 
 ## 八、两种事件循环对比
 
@@ -810,9 +745,11 @@ flowchart LR
 
 - [[LLM推理的GPU硬件基础]] — 本文各种设计的**硬件动因**：为什么必须连续组批（decode 是 memory-bound）、为什么 KV cache 是头号瓶颈、为什么索引全用 int32、为什么要做 PD 分离。
 - [[LLM推理压测-bench serve 与 throughput 参数详解]] — 压测 SGLang 服务的参数详解；本文的 RadixCache 前缀复用正是那里「前缀缓存作弊」的机制来源。
+- [[国产GPU与NPU适配]] — **§七 的完整版**：昇腾/摩尔线程的逐文件清单、树外插件的发现与激活流程、CANN + MindSpore 那条线。
+- [[LLM分布式]] — `srt/distributed/` 的背景：四种并行策略、集合通信原语，以及各家 `*_communicator.py` 的分工。
 
 ## 备注
 
 - 本文基于对 SGLang 的源码走读笔记整理，聚焦主干流程；**具体函数名 / 行号可能随 SGLang 版本变化，以实际代码为准**。
-- **版本基准**：§四（RadixCache 与 KV 内存池）、§五（注意力 Backend）、§六（custom_op 注册与多平台分派）与 §七（国产 GPU/NPU 适配清单）的实现细节均实扫自本地仓库 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）。
+- **版本基准**：§四（RadixCache 与 KV 内存池）、§五（注意力 Backend）、§六（custom_op 注册与多平台分派）与 §七（国产 GPU/NPU 适配）的实现细节均实扫自本地仓库 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）。
 - 架构图引自 [Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) 的 SGLang code-walk-through。
