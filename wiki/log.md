@@ -242,3 +242,13 @@
 - 核对：SGLang 参数（`--tp/pp/dp/ep-size`、`--enable-dp-attention`、`--moe-a2a-backend`、`--pp-max-micro-batch-size`、`--speculative-*`）与 `distributed/` 目录均实扫自 `d:/project/sglang` commit fdebc938f7（tag v0.5.16）；`--speculative-algorithm` 实际内置 7 种（含 NEXTN/DFLASH/DSPARK），已按源码写全
 - 级联：`wiki/index.md` 补上该篇条目（此前完全缺失）；`LLM推理的GPU硬件基础.md` See Also 加反向链接
 - 新增 2 处 ⚠️ 存疑：ZeRO 三级划分的出处、「先量化再加卡更划算」与「投机采样摊薄 All-Reduce」两条是我推的串联而非笔记原意
+
+## [2026-08-19] normalize | 国产 GPU/NPU 适配独立成篇
+- 新建 `wiki/学习整理/国产GPU与NPU适配.md`（213 行），内容抽自 `SGlang.md` §七
+- `SGlang.md` §七 由 91 行压成 26 行的概览（三个落点 + 现状表 + 与 §6.5/§6.6 的接头），保留章节号使 §八/§九 不移位；818 → 755 行
+- **抽出时核对源码，修正两处旧数字**：昇腾文档 16 篇 → 18 篇 .mdx + 3 子目录；NPU CI「5 条」→ 8 条（原文正文已列 8 条、汇总表写 5 条，自相矛盾）
+- **补上原先漏记的两块**：`srt/platforms/` 平台抽象层（`interface.py` + `device_mixin.py`，约 30 个方法，树内实现 cuda/rocm/cpu）；`srt/models/mindspore.py` + `mindspore_backend.mdx` 揭示的 **CANN + MindSpore** 框架接入线（实现在独立包 `sgl-mindspore`，支持 Qwen3 与 DeepSeek V3/R1）
+- **纠正一处路径不准**：树外插件加载器原写作 `srt/plugins/`，实际选择逻辑在 `srt/platforms/__init__.py::_resolve_platform()`；`srt/plugins/__init__.py` 只定义两个 entry_point 组名（`sglang.srt.platforms` / `sglang.srt.plugins`）
+- 新增（原文没有的）：`SGLANG_PLATFORM` 设置/未设置两条分支的完整流程与六档 fallback 链、front-loading filter 为什么要「先按名过滤再 import」、MUSA 走「重编译 CUDA」vs 昇腾「重写实现」的路线对比、§八 待补充清单
+- 级联：`index.md` 补新条目并改写 SGlang 条目末段；`SGlang.md` 内 5 处 §七 交叉引用改为指向新篇；两篇 See Also 互链
+- 边界声明：新篇 §一（CUDA 三层生态）标注为背景铺垫非实扫；全篇只有代码量证据，**无任何性能实测**
