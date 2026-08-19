@@ -22,7 +22,7 @@ SGLang 把流水线拆成**三个进程**，用 **ZMQ** 消息通道通信。这
 |---|---|
 | **主进程** | HTTP 服务 + **TokenizerManager**：把文本 tokenize 成 `input_ids` |
 | **Scheduler 子进程** | **调度大脑**：组批、管 KV 缓存、驱动模型前向 |
-| **Detokenizer 子进程** | 把输出 token 解码回文本，**流式**回传（增量解码细节见 §八） |
+| **Detokenizer 子进程** | 把输出 token 解码回文本，**流式**回传（增量解码细节见 §九） |
 
 ```mermaid
 flowchart LR
@@ -292,7 +292,7 @@ flowchart LR
 |---|---|---|
 | `is_idle()` | 直接返回空张量 | 不进 kernel，返回 `[q.shape[0], tp_q_head_num * v_head_dim]` 的空结果 |
 | `is_decode()` | `forward_decode` | 每请求 1 个新 token |
-| `is_mixed()` 且 `is_npu()` | `forward_mixed` | prefill+decode 混合批，**仅昇腾走这条**（见 §六） |
+| `is_mixed()` 且 `is_npu()` | `forward_mixed` | prefill+decode 混合批，**仅昇腾走这条**（见 §七） |
 | 其余（extend / prefill / target_verify…） | `forward_extend` | 每请求 N 个新 token |
 
 `forward_decode` / `forward_extend` / `forward_mixed` 在基类里都是 `raise NotImplementedError()`，**这三个才是子类真正要填的空**。
@@ -448,7 +448,7 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 4. **`_run_sdpa_forward_extend`**：SDPA 要求 `(H, N, D)` 排布，所以先 `movedim` 把 head 维提前；然后逐请求循环——切出该请求的 Q → **造一个带空位前缀的完整 Q**（`per_req_query_redudant`，前 `prefill_seq_len_q` 行留空）→ 用 `req_to_token[req_pool_idx, start_kv:end_kv]` 拉出该请求的 K/V → dtype 对齐 → 处理滑动窗口 mask → 算 attention → **只保留新 token 那部分**写回输出。
 5. **`_run_sdpa_forward_decode`**：同样的循环，但 `seq_len_q` 恒为 1，且不需要造冗余 Q。
 
-> **「造一个带空位前缀的完整 Q」这步值得停一下**：extend 时该请求已有 `prefix_len` 个历史 token 的 KV，新来 `extend_len` 个 Q。SDPA 的 `is_causal=True` 是按「Q 和 K 等长且对齐」推导掩码的，所以这里把 Q 补齐到和 KV 等长（前面留空），让因果掩码算对，**算完再把前缀那段扔掉**。这是用「多算一些 + 事后裁剪」换掉自定义掩码的复杂度——**和 §八 Detokenizer 用「全量减上下文」取增量是同一种思路：宁可重复计算，也不维护复杂状态。**
+> **「造一个带空位前缀的完整 Q」这步值得停一下**：extend 时该请求已有 `prefix_len` 个历史 token 的 KV，新来 `extend_len` 个 Q。SDPA 的 `is_causal=True` 是按「Q 和 K 等长且对齐」推导掩码的，所以这里把 Q 补齐到和 KV 等长（前面留空），让因果掩码算对，**算完再把前缀那段扔掉**。这是用「多算一些 + 事后裁剪」换掉自定义掩码的复杂度——**和 §九 Detokenizer 用「全量减上下文」取增量是同一种思路：宁可重复计算，也不维护复杂状态。**
 
 另外它覆盖了 `support_triton()` 返回 `False`，向框架声明「别给我走 Triton 路径」——这正是 5.2 ③ 那套能力声明的实例。
 
@@ -473,14 +473,189 @@ Triton **覆盖了** eager 入口（不用基类默认的两段式），内部�
 
 1. **复杂度和性能是正相关的**——TorchNative 只有 401 行、构造函数三行，代价是逐请求循环；FlashInfer 快，代价是 workspace、wrapper、两阶段、还要写一个 IndicesUpdater 适配层。**没有又快又简单的选项。**
 2. **越快的 backend，越多的工作被挪到了 forward 之外**：TorchNative 的准备工作几乎为零、全在 forward 里现算；Triton 把索引摊平到 metadata 阶段；FlashInfer 更进一步，把调度规划做成独立的 plan 阶段、甚至挪到独立 stream。**优化的方向始终是「把每层重复的活儿提到每批一次」。**
-3. **基类的抽象经受住了三种极端不同的实现**：一个是第三方库对象、一个是自写 kernel、一个是 Python 循环，但它们对上层暴露的都是同一个 `forward()` + 三个 metadata 钩子。这就是 §六 里国产卡能靠 `hardware_backend/<device>/` + 注册表接进来的前提。
+3. **基类的抽象经受住了三种极端不同的实现**：一个是第三方库对象、一个是自写 kernel、一个是 Python 循环，但它们对上层暴露的都是同一个 `forward()` + 三个 metadata 钩子。这就是 §七 里国产卡能靠 `hardware_backend/<device>/` + 注册表接进来的前提。
 
-## 六、国产 GPU/NPU 适配文件清单
+## 六、算子层：custom_op 注册与多平台分派
+
+§五讲的是「注意力这一类算子」怎么抽象。再往下一层，**所有算子**（layernorm、silu、all_reduce、MoE…）都撞上同两个问题：**外部 kernel 怎么和 `torch.compile` 共存**、**同一个算子在不同硬件上怎么换实现**。SGLang 用**两套彼此独立**的机制分别回答，这节把它们拆开看。
+
+> 实现在 `python/sglang/srt/utils/custom_op.py`（337 行）、`python/sglang/srt/utils/common.py` 里的 `direct_register_custom_op`、`python/sglang/srt/layers/utils/multi_platform.py`（134 行）。版本见文末备注。
+
+### 6.1 它到底解决什么
+
+一句话：**把外部 kernel 封装成 PyTorch 原生算子的适配层**。对三方各有交代：
+
+| 面向谁 | 诉求 | 谁负责 |
+|---|---|---|
+| **模型层** | 调用处只写一个统一名字（如 `torch.ops.sglang.layernorm`），用起来和内置的 `torch.nn.functional.layer_norm` 没区别 | 两条线都有份 |
+| **`torch.compile`** | 「这是我注册的自定义算子，**别往里 trace，当不透明黑盒**；输出形状按我给的 `fake_impl` 推」 | `register_custom_op` 这条线 |
+| **硬件切换** | 模型代码里不写 `if is_npu(): ... else: ...`，实现**在构造/注册时就绑死**到当前平台 | `MultiPlatformOp` + `direct_register_custom_op` 选的 dispatch key |
+
+> **一处要拧准的表述**：绑定发生在**构造时 / 注册时**，不是「每次调用时分派」——这正是它的价值所在，**运行时零分支**。两条线的时机还不一样：`direct_register_custom_op` 在**注册那一刻**（import 期）就挑好 dispatch key（见 6.5）；`MultiPlatformOp` 在**对象 `__init__` 那一刻**定下 `self._forward_method`（见 6.6）。都不是每次 forward 现判。
+
+### 6.2 五个零件
+
+| 零件 | 位置 | 一句话 |
+|---|---|---|
+| `register_custom_op` | `utils/custom_op.py:57` | 装饰器门面：校验参数、造 wrapper |
+| `CustomOpWrapper` | `utils/custom_op.py:133` | 真正的注册工：懒/立即注册、只注册一次、自动生成 `fake_impl` |
+| `register_custom_op_from_extern` | `utils/custom_op.py:197` | 直接包**外部库函数**，省掉自己写一层 wrapper |
+| `direct_register_custom_op` | `utils/common.py:2514` | 最底层：真正调 `torch.library` 的 `define` / `impl` / `_register_fake` |
+| `MultiPlatformOp` | `layers/utils/multi_platform.py:26` | **另一条线**：`nn.Module` 基类，构造时按平台绑 `forward_*` |
+
+前四个是**一条链**——上面三个入口最终都落到 `direct_register_custom_op`；`MultiPlatformOp` 和它们**没有调用关系**，解决的是另一个问题（见 6.7）。
+
+### 6.3 底层入口：`register_custom_op` 与 `CustomOpWrapper`
+
+装饰器本身很薄：校验参数 → 造一个 `CustomOpWrapper` → 按 `eager` 决定返回什么。
+
+**参数**：
+
+| 参数 | 默认 | 干嘛 |
+|---|---|---|
+| `op_name` | 函数名 | 注册到 `torch.ops.sglang.<op_name>` |
+| `mutates_args` | `[]` | 声明哪些参数会被**原地修改**。它会喂给 `torch.library.infer_schema` 生成带 mutation 标注的 schema——**编译器据此才知道这个 op 不能被重排、不能被当死代码消掉** |
+| `out_shape` | — | 简易方式：输出形状跟哪个输入一样，自动生成 `fake_impl`（`torch.empty_like(...)`）。**可以是 `int`（位置）也可以是 `str`（关键字名）**，如 `out_shape=0` / `out_shape="tensor"` / `out_shape="hidden_states"` |
+| `fake_impl` | — | 完整方式：自己给一个函数，描述输出形状与 dtype |
+| `eager` | `True` | 是否立即注册 |
+
+三条硬约束（都是源码里的 `assert`）：
+
+- `out_shape` 和 `fake_impl` **只能给一个**；
+- 两个都不给 → 视作**纯 inplace 算子**，`out_shape` 置 `None`，生成的 fake 直接返回 `None`；
+- 除这两个之外的额外 kwargs 一律报错（`expected_kwarg_keys >= extra_kwarg_keys`）。
+
+函数还写了 **4 个 `@overload` 声明**（out_shape 版 / fake_impl 版 × 带不带括号两种用法），纯给类型检查器看——所以 `@register_custom_op` 和 `@register_custom_op(out_shape=0)` 两种写法都合法（真实现里靠 `fn is not None` 分流）。
+
+**`CustomOpWrapper` 才是干活的**，三件事：
+
+1. **懒 / 立即注册**：`eager=True`（默认）时装饰器直接返回 `wrapper.real_impl`，**装饰那一刻就触发注册**；`eager=False` 时返回 `wrapper` 对象本身，靠 `__call__` 在**第一次调用**时才注册。源码注释写明为什么默认 eager——**「lazy registration does not work with torch compile」，懒注册会和 `torch.compile` 打架；torch.compile 在这里报错时，第一件事就是把它改成 eager**。
+2. **只注册一次**：`if not hasattr(torch.ops.sglang, self.op_name)` 才真注册，避免重复注册报错。加上 `self._impl` 的缓存，是**双保险**——前者防跨模块撞名，后者防同一个 wrapper 反复走注册路径。
+3. **自动生成 `fake_impl`**：只给了 `out_shape` 时，用 `inspect.signature(...).bind(*args, **kwargs)` + `apply_defaults()` 把实参绑到形参上，再取出那一个张量 `torch.empty_like` 一份。取不到就抛带签名的 `RuntimeError`，不会静默出错。
+
+> **一个容易漏掉的关键点**：`real_impl` 最后返回的是 `debug_torch_op(self.op_func, self.op_name)`，而它在日志关闭时**返回的是 `torch.ops.sglang.<op_name>` 本身，不是原来那个 Python 函数**。也就是说装饰完之后，模块里那个名字已经**指向注册后的 op** 了。这正是「对 `torch.compile` 表现为不透明黑盒」的落点——调用方拿到的就是 op 句柄，Dynamo 看到的是一个图节点。
+
+**真实例子**（`layers/layernorm.py:73`）：把 `flashinfer.norm.layernorm` 包成 `torch.ops.sglang.layernorm`，配一个手写的 `_layernorm_fake_impl` 返回 `torch.empty_like(input)`。整段还裹在 `try/except (ImportError, AttributeError)` 里——**flashinfer 装不上就把 `_flashinfer_layernorm_available` 置 `False` 走别的路，而不是让进程起不来**。全仓库这样的注册点有 60 余处。
+
+### 6.4 `register_custom_op_from_extern`：直接包外部库函数
+
+> 笔记原文写作 `register_custom_op_form_extern`，正确拼写是 **`from`** 不是 `form`（`utils/custom_op.py:197`）——按错名字 grep 会一无所获。
+
+用途：想把**外部库函数**（例如 `flashinfer.fused_moe.trtllm_fp8_block_scale_moe`）直接包成 custom op，又不想为它手写一个 wrapper 函数时用它。和 `register_custom_op` 的区别是**它不是装饰器，是个普通函数**，直接对现成的函数对象调用，返回注册后的 op。
+
+它比装饰器多两个参数，**这两个才是它存在的理由**：
+
+| 参数 | 解决什么 |
+|---|---|
+| `out_dtype` | 输出 dtype 和输入**不一样**时用。给了就走 `torch.empty(ref.shape, dtype=out_dtype, device=ref.device)` 而不是 `empty_like`。典型场景：**fp8 输入 → bf16 输出**，量化 kernel 里到处是 |
+| `computed_args` | 一个 `{参数名: 计算函数}` 字典。这些参数**被排除在 op schema 之外**，改成在 op 内部运行时现算 |
+
+`computed_args` 值得展开——它是为 **`torch.compile` 重编译**准备的。像 `tune_max_num_tokens` 这种参数会随 batch 变（`next_power_of_2(hidden_states.shape[0])`），如果它出现在 schema 里，**值一变就触发一次重新编译**。解法是把它从签名里摘掉（`inspect.signature(...).replace(parameters=new_params)` 造一个瘦签名），改在算子体内部由 `hidden_states` 现推。源码为此还把 `__name__` / `__qualname__` / `__module__` / `__signature__` / `__annotations__` 一个个搬到 wrapper 上——因为下游的 `infer_schema` 全靠这些元信息。
+
+两条使用前提，源码 docstring 明写：
+
+- 外部函数**必须有 `torch.library.infer_schema` 认得的类型标注**（`torch.Tensor` / `int` / `float` / `bool` / `Optional[torch.Tensor]` 等），没标注就用不了；
+- 它是**幂等**的，同名重复调用会安全跳过；且**没有懒注册**这条路——调用即注册。
+
+树内实际用它的地方不多（5 处），都是包 flashinfer / AWQ 这类外部 kernel，例如 `layers/quantization/fp4_utils.py` 的 `fp4_quantize`、`hardware_backend/gpu/quantization/awq_kernels.py` 的 `awq_dequantize`。
+
+### 6.5 `direct_register_custom_op`：最后落到 `torch.library`
+
+三个入口最终都汇到这里。它不在 `custom_op.py` 里，而在 `utils/common.py:2514`，**docstring 第一句就是「请优先用 `register_custom_op`，别直接调我」**。
+
+**为什么不直接用 `torch.library.custom_op`**：源码注释说得很直白——那个 API「can have significant overhead because it needs to consider complicated dispatching logic」。这里的做法是绕开通用分派，直接对着一个 dispatch key 注册。
+
+它持有一个模块级的 `sglang_lib = Library("sglang", "FRAGMENT")`，**算子的生命周期绑在这个 Library 对象上**（注释专门警告：换 `target_lib` 时要保证那个对象还活着）。
+
+五步：
+
+1. **查重**：已经有同名 op 就**直接 return**，静默跳过；
+2. **推 schema**：`torch.library.infer_schema(op_func, mutates_args=mutates_args)`，PyTorch 2.4 走 `torch._custom_op.impl.infer_schema` 兜底；
+3. **`my_lib.define(op_name + schema_str)`** —— 声明算子；
+4. **`my_lib.impl(op_name, op_func, <dispatch key>)`** —— 绑实现，**key 按平台挑**：
+
+   | 平台判定 | dispatch key |
+   |---|---|
+   | `is_npu()`（昇腾） | `PrivateUse1` |
+   | `is_xpu()`（Intel） | `XPU` |
+   | `is_musa()`（摩尔线程） | `MUSA` |
+   | 其余 | `CUDA` |
+
+5. **`my_lib._register_fake(op_name, fake_impl)`** —— 挂上假实现，供编译期推形状。
+
+> **第 4 步是这一节和 §七 的接头处**：注册时只绑**一个** key，也就是说这套机制产出的是**当前这台机器的**算子，不是一个多设备分派表。昇腾用 `PrivateUse1`（PyTorch 给树外设备预留的通用 key）也印证了 §七 里说的「昇腾是树内一等公民，但仍走 PyTorch 的外挂设备通道」。
+
+错误处理有个细节值得学：`RuntimeError` 里只有同时含 "Tried to register an operator" 与 "multiple times" 的才吞掉（注释说明是为**同进程多引擎**场景，例如 VERL 框架），其余照抛；而 `AttributeError` **一律重抛**——因为那通常意味着依赖没装，静默掉会变成很难查的下游报错。
+
+### 6.6 上层：`MultiPlatformOp` 平台分派基类
+
+底层的 `register_custom_op` 解决了「外部 kernel 跟 `torch.compile` 共存」，但**没解决「同一个算子在不同硬件上有不同实现」**——这就是 `MultiPlatformOp` 的活。
+
+它是个 `nn.Module` 子类，模式非常简单：
+
+```python
+def __init__(self):
+    super().__init__()
+    self._forward_method: Callable = self.dispatch_forward()   # 构造时定一次
+
+# Please do not override this method, ...
+@debug_kernel_api
+def forward(self, *args, **kwargs):
+    return self._forward_method(*args, **kwargs)               # 运行时零判断
+```
+
+**钩子与默认回退**，这张表才是设计的精华：
+
+| 钩子 | 默认行为 |
+|---|---|
+| `forward_native` | `NotImplementedError`（**纯 PyTorch 实现，子类必须写**） |
+| `forward_cuda` | `NotImplementedError` |
+| `forward_hip` | → **`forward_cuda`** |
+| `forward_musa` | → **`forward_cuda`** |
+| `forward_npu` / `forward_xpu` / `forward_hpu` / `forward_cpu` | → `forward_native` |
+
+**回退方向是有讲究的**：HIP（AMD）和 MUSA（摩尔线程）默认落到 `forward_cuda`，因为它们的 API 和 CUDA 高度相似，源码往往一字不改就能跑；其余平台默认落到 `forward_native` 纯 PyTorch——**慢，但一定对**。新厂商接进来只需要覆盖真正不一样的那几个方法，其余自动有兜底，**这和 §五 基类 capability flags「只声明差异项」是同一路数**。
+
+`dispatch_forward()` 的顺序：**先看是不是树外平台**（`current_platform.is_out_of_tree()`）——先查 `_oot_forward_registry` 注册表，再试 `getattr(self, f"forward_{key}")`，都没有就 `forward_native`；不是树外才走树内链 `cuda → hip → cpu（且有 AMX）→ npu → xpu → musa → native`。
+
+> **注意 CPU 那一支要求 `_is_cpu and _is_cpu_amx_available`**：没有 AMX 的普通 CPU 不会走 `forward_cpu`，而是一路掉到链尾的 `forward_native`。
+
+`register_oot_forward(op_cls, fn, platform_key)` 这个 classmethod 是**给树外插件的注入口**：厂商可以在自己的 pip 包里，为**已有的算子类**挂上自己平台的 forward 实现，不用改主仓库一行代码。这正是 §七 里 `SGLANG_PLATFORM` entry_point 插件机制在算子层的落点。
+
+树内目前有 **21 个子类**，覆盖面能说明它的地位：激活（`SiluAndMul` / `GeluAndMul` / `NewGELU` / `ReLU2` / `QuickGELU` / `XIELU`）、归一化（`RMSNorm` / `LayerNorm` / `GemmaRMSNorm` / `Gemma3RMSNorm` / `Gemma4RMSNorm` / `RMSNormWithoutScale` / `Mixer2RMSNormGated`）、位置编码（`RotaryEmbedding` / `DualChunkRotaryEmbedding`）、MoE（`TopK` / `UnquantizedFusedMoEMethod`）、卷积（`Conv2dLayer` / `Conv3dLayer`）、以及 DSA `Indexer` 与 DSV4 `Compressor`。
+
+以 `SiluAndMul` 为例，一个类里塞了 6 套实现：`forward_native`（`F.silu(x[..., :d]) * x[..., d:]`）、`forward_cuda`（`sgl_kernel` 的 `silu_and_mul`）、`forward_aiter`（AMD）、`forward_cpu`（走 `torch.ops.sgl_kernel.silu_and_mul_cpu`，且**要判 AMX**）、`forward_npu`（`torch_npu.npu_swiglu`）、`forward_musa`（用 `nn.SwishGLU`，注释说明在 MUSA 上比 silu_and_mul 更快）。**模型层始终只写 `SiluAndMul()(x)`。**
+
+> 子类还可以在 `__init__` 里**直接改写 `self._forward_method` 覆盖分派结果**——`SiluAndMul` 在 `rl_on_policy_target` 非空时强制走 `forward_native`（RL 训练要求数值可复现），`RMSNorm` 在 aiter 可用时改走 `forward_aiter`。这是分派表之外的一条逃生门。
+
+### 6.7 两条线怎么配合——一个反直觉的点
+
+`MultiPlatformOp` 还有第二个身份：**`torch.compile` 的开关**。
+
+`enter_torch_compile(num_tokens)` 会把 `_forward_method` **临时换成 `forward_native`**（原方法存进 `_original_forward_method`），`leave_torch_compile()` 再换回来。驱动它的是 `compilation/torch_compile_decoration.py` 的 `_to_torch`，递归遍历 `model._modules`，对每个 `MultiPlatformOp` 实例调用 enter / leave。
+
+于是就有了这个**看着矛盾的对照**：
+
+| | 面对 `torch.compile` 的策略 | 手段 |
+|---|---|---|
+| `register_custom_op` | **绕开编译器** | 把 kernel 藏成不透明节点，Dynamo 不许 trace 进去，形状靠 `fake_impl` 推 |
+| `MultiPlatformOp.enter_torch_compile` | **迎合编译器** | 把厂商 kernel **换掉**，临时切回纯 PyTorch 的 `forward_native`，好让 Inductor trace 得进去、融得起来 |
+
+同一个「怎么和 `torch.compile` 相处」的问题，两个相反的答案。**判据是这个算子值不值得被融合**：layernorm、silu 这类访存密集的小算子，让 Inductor 融进上下游能省掉一整轮显存读写，所以宁可放弃手写 kernel；本身就是大 kernel、编译器也融不动的，就选择整块藏起来。
+
+源码里还留了两处**打过补丁的痕迹**，很能说明这套东西是被真实性能数据修出来的：
+
+- **`FusedMoE` 和 `TopK` 只在 `num_tokens == 1` 时才切 `forward_native`**。注释写明 `torch.compile` 在这一层「bs > 1 时表现不总是好」，所以只在 bs=1 这一档吃编译收益。
+- **`enter_torch_compile` 开头有 `if self.is_torch_compile: return` 的幂等守卫**。注释解释：像 `RotaryEmbedding` 这类算子会**被多层复用**，同一个对象会被 `_to_torch` 撞上很多次，没有这道守卫的话 `_original_forward_method` 会被自己覆盖掉，`leave` 时就再也换不回原来的实现了。
+
+**一句话收口**：底层那条链管「**这个 kernel 长什么样、编译器怎么看它**」，`MultiPlatformOp` 管「**这台机器该用哪个 kernel、要不要为编译器让路**」。两条线正交，所以一个 `RMSNorm` 既是 `MultiPlatformOp` 子类，它的 `forward_cuda` 里又可以调用一个 `register_custom_op` 注册出来的 op。
+
+## 七、国产 GPU/NPU 适配文件清单
 
 > 基于本地仓库 `d:/project/sglang`（commit `fdebc938f7`，tag `v0.5.16`）实扫。**树内**只有华为昇腾和摩尔线程两家；其余国产芯片走**树外插件**路径。
 > 注意 `xpu` 是 **Intel** 独显（`hardware_backend/xpu/__init__.py` 明写 "XPU (Intel GPU)"），**不是**昆仑芯，别看名字想当然。
 
-### 6.1 适配的三种落点
+### 7.1 适配的三种落点
 
 SGLang 把硬件适配收敛到三个层次，看任何一家的适配都可以按这个顺序找：
 
@@ -492,7 +667,7 @@ SGLang 把硬件适配收敛到三个层次，看任何一家的适配都可以�
 
 `hardware_backend/` 目录本身就是这套设计的产物，同级并列：`gpu`（NVIDIA）、`cpu`、`mlx`（Apple）、`xpu`（Intel）、**`npu`（昇腾）**、**`musa`（摩尔线程）**。
 
-### 6.2 华为昇腾 Ascend NPU —— 适配最深
+### 7.2 华为昇腾 Ascend NPU —— 适配最深
 
 树内唯一的**一等公民级**国产适配：覆盖 attention、MoE、量化、图捕获、投机解码、PD 分离、LoRA，并有独立 CI 与完整文档。
 
@@ -531,7 +706,7 @@ SGLang 把硬件适配收敛到三个层次，看任何一家的适配都可以�
 
 > 昇腾适配深到有**自己的算子开发指南**和**多机 E2E nightly**，说明是有厂商团队常驻维护的，不是一次性 PR。
 
-### 6.3 摩尔线程 MUSA —— 适配较浅但自带 kernel 编译链
+### 7.3 摩尔线程 MUSA —— 适配较浅但自带 kernel 编译链
 
 覆盖面窄（attention + 少量算子），但特别之处是**在 `sgl-kernel` 里有独立的 C++ 编译入口**，即自带一套 kernel 构建体系。
 
@@ -547,7 +722,7 @@ SGLang 把硬件适配收敛到三个层次，看任何一家的适配都可以�
 
 注意 MUSA 的 attention 入口在 `attention_registry.py` 里是**用 `_is_musa` 全局开关拦截替换**（`if not _is_musa: ...` 那段），而不像 ascend 那样用 `@register_attention_backend` 注册成一个具名 backend。
 
-### 6.4 树外插件路径（昆仑芯等）
+### 7.4 树外插件路径（昆仑芯等）
 
 其余国产芯片（昆仑芯、寒武纪、海光、壁仞、天数、沐曦等）在本仓库**没有任何树内代码**（实扫 `cambricon` / `biren` / `metax` / `hygon` / `iluvatar` / `tecorigin` 全部零命中）。它们通过**插件机制**在树外适配：
 
@@ -558,7 +733,7 @@ SGLang 把硬件适配收敛到三个层次，看任何一家的适配都可以�
 
 > 这是个**很聪明的解耦**：厂商把适配代码放自己的 pip 包里，通过 entry_point 注册，主仓库不用为每家芯片背维护成本，也不用在 import 时踩到装不上的厂商 SDK。想了解某家国产卡的支持情况，先去它自己的 fork 或 pip 包里找，别在主仓库 grep。
 
-### 6.5 一句话总结
+### 7.5 一句话总结
 
 | 厂商 | 路径 | 深度 | 独立 CI | 文档 |
 |---|---|---|---|---|
@@ -566,7 +741,7 @@ SGLang 把硬件适配收敛到三个层次，看任何一家的适配都可以�
 | **摩尔线程** | 树内 `hardware_backend/musa/` + `sgl-kernel` | 浅（attention 为主）+ 自带 kernel 链 | ✅ 2 条 | 1 篇 |
 | **昆仑芯等其余** | 树外插件 `SGLANG_PLATFORM` | 不在本仓库 | ❌ | 仅机制文档 |
 
-## 七、两种事件循环对比
+## 八、两种事件循环对比
 
 | | `event_loop_normal` | `event_loop_overlap` |
 |---|---|---|
@@ -576,7 +751,7 @@ SGLang 把硬件适配收敛到三个层次，看任何一家的适配都可以�
 
 读源码建议：先用 `normal` 理清主干，再看 `overlap` 如何用 future + 多 stream 把流水线气泡填满。
 
-## 八、Detokenizer 事件循环：增量解码回文本
+## 九、Detokenizer 事件循环：增量解码回文本
 
 Scheduler 每轮吐出的是 **token id**，得由 Detokenizer 子进程解码回文本再交给用户。它的主循环同样是「收 → 分发 → 发」三步，但难点全在**增量解码**——不能等一句话的 token 全到齐再解码，得**边收边吐**，还要保证 BPE 边界正确、不把半个 UTF-8 字符吐出去。
 
@@ -639,24 +814,5 @@ flowchart LR
 ## 备注
 
 - 本文基于对 SGLang 的源码走读笔记整理，聚焦主干流程；**具体函数名 / 行号可能随 SGLang 版本变化，以实际代码为准**。
-- **版本基准**：§四（RadixCache 与 KV 内存池）、§五（注意力 Backend）与 §六（国产 GPU/NPU 适配清单）的实现细节均实扫自本地仓库 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）。
+- **版本基准**：§四（RadixCache 与 KV 内存池）、§五（注意力 Backend）、§六（custom_op 注册与多平台分派）与 §七（国产 GPU/NPU 适配清单）的实现细节均实扫自本地仓库 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）。
 - 架构图引自 [Awesome-ML-SYS-Tutorial](https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial) 的 SGLang code-walk-through。
-custom_ops注册机制：
-把外部kernel封装成pytorch原生算子的适配层
-对模型层暴漏一个统一的算子（比如torch.ops.sglang.layernorm）,跟内置的torch.nn.functional.layer_norm用起来一样
-对torch.compile：这是我们注册的自定义算子，请当不透明黑盒处理，形状用我提供的fake_impl推。
-对硬件切换：模型代码不写if-else，注册机制在导入时根据当前平台绑到不同实现
-底层注册基础设施：
-	register_custom_op装饰器
-	参数 干嘛 op_name 注册到 torch.ops.sglang.<op_name> 。默认 = 函数名 mutates_args 声明哪些参数会被 in-place 修改（PyTorch 需要知道以做正确性检查） out_shape 简易方式：告诉框架输出形状跟哪个输入一样（ torch.empty_like(args[out_shape]) ） fake_impl 完整方式：给一个函数，自己描述输出形状/dtype eager 是否立即注册。默认 True，防止懒注册跟 torch.compile 冲突
-	CustomOpWrapper真正的注册工：
-	- 懒/立即注册 ：如果 eager=True （默认），装饰函数时立刻访问 wrapper.real_impl 触发一次注册。如果 eager=False ，第一次调用时才注册。
-	- 只注册一次 ： if not hasattr(torch.ops.sglang, self.op_name) ——避免重复注册报错。
-	- fake_impl 自动生成 ：如果用户只给 out_shape=0 ，就自动生成一个"输出跟第 0 个参数形状一样"的 fake_impl。
-	register_custom_op_form_extern;包装外部库
-	当你想直接把 外部库函数 （比如 flashinfer.fused_moe.trtllm_fp8_block_scale_moe ）包成 custom op，不想自己写一个 wrapper 函数时用它。
-	direct_register_custom_op(真正调用torch.library的函数，被上面调用)
-上层平台分派基类：
-	MultiPlatformOp基类（提供forward_cuda/forward_hip/forward_native等钩子）
-	底层的 register_custom_op 解决了"外部 kernel 跟 torch.compile 共存"，但没解决" 同一个算子在不同硬件上有不同实现 "。这就是 MultiPlatformOp 的活。
-	current_platform全局平台探测

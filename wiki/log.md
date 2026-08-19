@@ -217,3 +217,17 @@
 - 修正 §六 引言遗留的 `release/v0.5.16 线` → `tag v0.5.16`，与文末备注统一
 - 全文 573 → 643 行；§五 交叉引用（§5.2→§5.5/§5.4、§4.5、§三、§六、§八）全部复核自洽
 - 更新 index.md 摘要（补 ragged/paged 要点）
+
+## [2026-08-19] normalize | SGLang 新增 §六 算子层：custom_op 注册与多平台分派
+
+用户在文末粘了一段 custom_op 注册机制的原始笔记（tab 缩进、无结构）。全部实扫 `d:/project/sglang`（commit `fdebc938f7`，tag `v0.5.16`）核对后，重写成独立的 §六，放在 §五（注意力 Backend）之后、原 §六（国产 GPU/NPU 适配）之前——理由：它是「注意力这一类算子」再往下一层的**通用算子**抽象，且直接给下一节的硬件适配打底（dispatch key / OOT 注册口）。原 §六/七/八 顺延为 §七/八/九，全文 §x 交叉引用与备注版本基准行同步改过。
+
+- 纠正拼写：`register_custom_op_form_extern` → **`register_custom_op_from_extern`**（`utils/custom_op.py:197`），按错名字 grep 不到。
+- 纠正表述：笔记写「注册机制在**导入时**根据当前平台绑到不同实现」。实为**两条独立的线、两个不同时机**——`direct_register_custom_op` 在注册那刻（import 期）挑 dispatch key；`MultiPlatformOp` 在对象 `__init__` 那刻定 `_forward_method`。共同点是都**不在每次 forward 现判**，运行时零分支。已拆成 6.1 的表 + 提示块讲清。
+- 补全笔记未写的部分：`out_shape` 可以是 `int` 也可以是 `str`（源码 `bound.args[i]` vs `bound.arguments[name]` 两条取值路径）；4 个 `@overload` 只为类型检查器存在；`real_impl` 最终返回的是 `debug_torch_op(...)`，日志关闭时**它就是 `torch.ops.sglang.<op_name>` 本身**——这才是「对 torch.compile 是黑盒」的落点；`mutates_args` 的真实作用是喂给 `infer_schema` 让编译器不敢重排/消除该 op。
+- 补全笔记只写了名字的 `register_custom_op_from_extern`：它**不是装饰器是普通函数**；两个独有参数 `out_dtype`（fp8 入 bf16 出这类）与 `computed_args`（把随 batch 变的参数移出 schema，**防 torch.compile 反复重编译**，为此要手工搬 `__name__`/`__signature__`/`__annotations__`）；幂等、无懒注册；树内仅 5 处调用。
+- 补全笔记只写了一句的 `direct_register_custom_op`：不在 `custom_op.py` 而在 `utils/common.py:2514`；docstring 明说「优先用 register_custom_op」；为什么不用 `torch.library.custom_op`（通用分派开销大）；`sglang_lib = Library("sglang", "FRAGMENT")` 与算子生命周期绑定；五步（查重→infer_schema→define→impl→_register_fake）；**第四步按平台挑 dispatch key 的四行分支**（npu→`PrivateUse1` / xpu→`XPU` / musa→`MUSA` / 其余→`CUDA`），这条是和 §七 昇腾适配的接头；错误处理只吞「多引擎重复注册」那一种 RuntimeError、AttributeError 一律重抛。
+- 补全笔记只有一行的 `MultiPlatformOp`：完整钩子回退表（**hip/musa 默认落 `forward_cuda`，其余落 `forward_native`**，方向不对称是因为 HIP/MUSA 的 API 贴近 CUDA）；`dispatch_forward()` 先判树外平台再走树内链；CPU 那支要求 `_is_cpu_amx_available`；`register_oot_forward` 是给树外插件的注入口（对应 §七 的 `SGLANG_PLATFORM` entry_point）；树内 21 个子类清单；`SiluAndMul` 六套实现的实例；子类可在 `__init__` 直接改写 `_forward_method` 覆盖分派（RL 复现、aiter）。
+- **新增笔记完全没有的 6.7**：`MultiPlatformOp` 的第二身份是 `torch.compile` 开关（`enter/leave_torch_compile` + `torch_compile_decoration.py:_to_torch` 递归遍历）。由此点出两条线对编译器的**相反策略**——底层把 kernel 藏成不透明黑盒**绕开**编译器，`MultiPlatformOp` 反而把厂商 kernel 换成 `forward_native` **迎合**编译器，判据是该算子值不值得被 Inductor 融合。附两处补丁痕迹：FusedMoE/TopK 仅 `num_tokens == 1` 才切 native；`is_torch_compile` 幂等守卫是为 `RotaryEmbedding` 这类被多层复用的对象准备的。
+- 级联：`wiki/index.md` 条目补 custom_op 段并把 Updated 改到 2026-08-19。
+- 无新增存疑项；§五 里 `plan_stream` 那条旧的 ⚠️ 仍待用户确认。
