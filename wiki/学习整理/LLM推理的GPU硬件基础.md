@@ -118,7 +118,7 @@ SGLang 的 `--mem-fraction-static` 就是划这条线的：**先给权重和静�
 | 层级                           | 容量（H100）  | 延迟             | 带宽        |
 | ---------------------------- | --------- | -------------- | --------- |
 | 寄存器                          | 256 KB/SM | ~1 cycle       | 极高        |
-| **Shared Memory（SRAM） / L1** | 228 KB/SM | ~20-30 cycle   | ~10+ TB/s |
+| **Shared Memory（SMEM） / L1** | 228 KB/SM | ~20-30 cycle   | ~10+ TB/s |
 | **L2** cache                 | 50 MB     | ~200 cycle     | ~5 TB/s   |
 | **HBM（显存）**                  | 80 GB     | ~400-800 cycle | 3.35 TB/s |
 | CPU 内存（PCIe 5.0）             | TB 级      | ~微秒            | ~64 GB/s  |
@@ -126,7 +126,7 @@ SGLang 的 `--mem-fraction-static` 就是划这条线的：**先给权重和静�
 
 **每往下一级，带宽掉一个量级。** 这解释了两件事：
 
-1. **FlashAttention 为什么快** —— 它不减少计算量，只是把注意力计算切块塞进 SRAM，避免把巨大的中间矩阵写回 HBM 再读出来。**省的是 HBM 往返**。
+1. **FlashAttention 为什么快** —— 它不减少计算量，只是把注意力计算切块塞进 SMEM，避免把巨大的中间矩阵写回 HBM 再读出来。**省的是 HBM 往返**。
 2. **KV offload 的账** —— 挪到 CPU 内存要过 PCIe（64 GB/s，比 HBM 慢 50 倍），但**仍远快于重新 prefill**。这就是分层缓存成立的理由。
 
 ### 3.3 附：为什么索引用 int32 而非 int64

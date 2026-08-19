@@ -24,3 +24,5 @@ Reduce Scatter：先归约（Reduce），再分散（Scatter）
 All-to-All：将节点i的发送缓冲区中的第j块数据发送给节点j。节点j将接收到的来自节点i的数据块，放在自身接收缓冲区的第i块位置。
 ![[Pasted image 20260819151512.png]]Ring All reduce：
 	见[https://zhuanlan.zhihu.com/p/69797852]
+SM（流式多处理器）：GPU的主要计算单元，可以粗略理解为 GPU 内部的一个“计算集群”。
+**Warp 是 CUDA 实际调度线程的基本单位**。在 NVIDIA GPU 上1warp=32threads，这 32 个线程通常执行同一条指令，但处理不同的数据，即 SIMT 模式。
