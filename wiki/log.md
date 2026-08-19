@@ -231,3 +231,14 @@
 - **新增笔记完全没有的 6.7**：`MultiPlatformOp` 的第二身份是 `torch.compile` 开关（`enter/leave_torch_compile` + `torch_compile_decoration.py:_to_torch` 递归遍历）。由此点出两条线对编译器的**相反策略**——底层把 kernel 藏成不透明黑盒**绕开**编译器，`MultiPlatformOp` 反而把厂商 kernel 换成 `forward_native` **迎合**编译器，判据是该算子值不值得被 Inductor 融合。附两处补丁痕迹：FusedMoE/TopK 仅 `num_tokens == 1` 才切 native；`is_torch_compile` 幂等守卫是为 `RotaryEmbedding` 这类被多层复用的对象准备的。
 - 级联：`wiki/index.md` 条目补 custom_op 段并把 Updated 改到 2026-08-19。
 - 无新增存疑项；§五 里 `plan_stream` 那条旧的 ⚠️ 仍待用户确认。
+
+## [2026-08-19] normalize | LLM分布式：结构化重写 + 与 GPU 硬件基础打通
+- 原文 52 行无标题的流水笔记 → 301 行八节结构：并行策略 / 通信原语 / 通信代价 / 训练 vs 推理 / SM-Warp / 量化 / 投机采样 / SGLang 落点
+- **assets 归位**：`_inbox` 20 张图 → 16 张按 `dist-<对象>-<内容>.png` 改名进 `assets/学习整理/`，笔记内 16 处引用同步换成短链；3 张 md5 相同且无人引用的重复图删除，`_inbox` 清空
+- **补全 Ring All-Reduce**：原文只有一个知乎裸链接，用 4 张原本没被引用的 `_inbox` 图补出 scatter-reduce + all-gather 两阶段完整讲解，并点出「通信量与卡数无关」
+- **修复投机采样表**：原为终端 ASCII 制表符粘贴，顶边框丢失、MTP 一行文字截断，重排为 markdown 表并补回「EAGLE 式 draft 用」，观点未增删
+- **与 [[LLM推理的GPU硬件基础]] 结合**：重叠部分（SM/warp 层级、精度格式、互联带宽、并行通信代价）改为交叉引用而非重述；新增该篇没有的「训练 vs 推理地位重排」对照表，并把 TP 的推理收益接到那篇「decode 速度上限 = 带宽 ÷ 权重字节」的结论上
+- 补充（原文只有名词或一句话的）：参数服务器瓶颈成因、ZeRO 三级、气泡占比公式、1F1B 省的是显存不是气泡、Megatron「列→行」配对、EP 负载不均、八原语的组合关系表、AWQ 与 GPTQ 的路线分野、W4 与 W8A8 在 decode/prefill 上的不同
+- 核对：SGLang 参数（`--tp/pp/dp/ep-size`、`--enable-dp-attention`、`--moe-a2a-backend`、`--pp-max-micro-batch-size`、`--speculative-*`）与 `distributed/` 目录均实扫自 `d:/project/sglang` commit fdebc938f7（tag v0.5.16）；`--speculative-algorithm` 实际内置 7 种（含 NEXTN/DFLASH/DSPARK），已按源码写全
+- 级联：`wiki/index.md` 补上该篇条目（此前完全缺失）；`LLM推理的GPU硬件基础.md` See Also 加反向链接
+- 新增 2 处 ⚠️ 存疑：ZeRO 三级划分的出处、「先量化再加卡更划算」与「投机采样摊薄 All-Reduce」两条是我推的串联而非笔记原意

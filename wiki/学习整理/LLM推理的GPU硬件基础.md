@@ -268,8 +268,9 @@ Prefill FLOPs        ≈ 2 × 参数量 × token 数
 - [[SGlang]] — 本文的硬件约束在框架层的具体实现：组批、RadixCache、attention backend、PD 分离。
 - [[LLM推理压测-bench serve 与 throughput 参数详解]] — 用压测验证本文的估算：TTFT 反映 prefill（compute-bound），TPOT/ITL 反映 decode（memory-bound）。
 - [[DeepSeek-V3 架构与低成本高效训练]] — MLA 如何从架构层面把 KV cache 压小；MoE「吃显存省算力」的典型。
+- [[LLM分布式]] — **本文 §五（多卡互联与并行策略）的展开**：DP/PP/TP/EP 各自的内部机制、集合通信原语与 Ring All-Reduce 的两阶段推导，以及量化与投机采样这两条不靠加卡的提速路。
 
-> 三篇构成闭环：**硬件原理（本文）→ 框架实现（SGlang）→ 压测验证（压测详解）**。
+> 三篇构成闭环：**硬件原理（本文）→ 框架实现（SGlang）→ 压测验证（压测详解）**；**[[LLM分布式]] 则是本文 §四、§五 往软件侧的延伸**。
 
 ## 备注
 
