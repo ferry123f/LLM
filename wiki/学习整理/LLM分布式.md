@@ -298,3 +298,5 @@ decode 是 memory-bound 的——**搬一次权重只产出 1 个 token，算力
 - §七 的投机采样表原为终端 ASCII 制表符绘制，顶边框缺失、MTP 一行被截断，已重排为 markdown 表并补回截断文字，**观点未增删**。
 - §八 的 SGLang 参数与文件路径核对自 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）；**参数名可能随版本变化，以 `--help` 为准**。
 - §1.1 的 ZeRO 三级划分见正文中的 ⚠️ 存疑标注。
+
+**NIXL**由 Nvidia Dynamo 分布式 LLM 推理框架创建，作为其键值 (KV) 传输解决方案。它采用模块化设计，包含多种传输后端，例如文件系统、POSIX 套接字和 RDMA 网络。它支持多种 RDMA 网络后端：一种基于高性能计算的通信库UCX，ling'yi'zhong
