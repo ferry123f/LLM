@@ -647,9 +647,16 @@ custom_ops注册机制：
 对torch.compile：这是我们注册的自定义算子，请当不透明黑盒处理，形状用我提供的fake_impl推。
 对硬件切换：模型代码不写if-else，注册机制在导入时根据当前平台绑到不同实现
 底层注册基础设施：
-	register_custom_op装饰器+CustomOpWrapper类+register_custom_op_form_extern
+	register_custom_op装饰器
+	参数 干嘛 op_name 注册到 torch.ops.sglang.<op_name> 。默认 = 函数名 mutates_args 声明哪些参数会被 in-place 修改（PyTorch 需要知道以做正确性检查） out_shape 简易方式：告诉框架输出形状跟哪个输入一样（ torch.empty_like(args[out_shape]) ） fake_impl 完整方式：给一个函数，自己描述输出形状/dtype eager 是否立即注册。默认 True，防止懒注册跟 torch.compile 冲突
+	CustomOpWrapper真正的注册工：
+	- 懒/立即注册 ：如果 eager=True （默认），装饰函数时立刻访问 wrapper.real_impl 触发一次注册。如果 eager=False ，第一次调用时才注册。
+	- 只注册一次 ： if not hasattr(torch.ops.sglang, self.op_name) ——避免重复注册报错。
+	- fake_impl 自动生成 ：如果用户只给 out_shape=0 ，就自动生成一个"输出跟第 0 个参数形状一样"的 fake_impl。
+	register_custom_op_form_extern;包装外部库
+	当你想直接把 外部库函数 （比如 flashinfer.fused_moe.trtllm_fp8_block_scale_moe ）包成 custom op，不想自己写一个 wrapper 函数时用它。
 	direct_register_custom_op(真正调用torch.library的函数，被上面调用)
-	register_custom_op
 上层平台分派基类：
 	MultiPlatformOp基类（提供forward_cuda/forward_hip/forward_native等钩子）
+	底层的 register_custom_op 解决了"外部 kernel 跟 torch.compile 共存"，但没解决" 同一个算子在不同硬件上有不同实现 "。这就是 MultiPlatformOp 的活。
 	current_platform全局平台探测
