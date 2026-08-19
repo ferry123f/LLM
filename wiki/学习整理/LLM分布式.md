@@ -23,4 +23,4 @@ Reduce Scatter：先归约（Reduce），再分散（Scatter）
 ![[Pasted image 20260819151346.png]]
 All-to-All：将节点i的发送缓冲区中的第j块数据发送给节点j。节点j将接收到的来自节点i的数据块，放在自身接收缓冲区的第i块位置。
 ![[Pasted image 20260819151512.png]]Ring All reduce：
-	![[Pasted image 20260819152041.png|386]]![[Pasted image 20260819152055.png|279]]
+	
