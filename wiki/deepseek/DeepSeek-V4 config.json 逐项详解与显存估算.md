@@ -76,19 +76,19 @@ embedding = 129280 × 7168 ≈ 0.93B
 
 概念：**MoE** = 与其一个大 FFN 共用，不如养一堆小 FFN（专家），路由器给每个 token 挑几个最合适的——**参数总量巨大、每 token 只动用一小撮**。显存装全部，算力只花激活的。
 
-| 字段 | 值 | 含义 |
-|---|---|---|
-| `n_routed_experts` | 384 | 每层 384 个专家 |
-| `num_experts_per_tok` | 6 | 每 token 挑 6 个，稀疏率 6/384 ≈ 1.6% |
-| `n_shared_experts` | 1 | 1 个必经的共享专家（学通用知识），路由专家学专门知识。每 token 实际过 7 个 |
-| `moe_intermediate_size` | 3072 | 单专家中间维。一个专家 = SwiGLU 三矩阵（gate/up/down），各 `7168 × 3072` |
-| `scoring_func` | sqrtsoftplus | 路由亲和度打分函数，V3 的 Sigmoid → V4 的 √Softplus(·) |
-| `topk_method` | noaux_tc | **无辅助损失负载均衡**（V3 首创）：给专家挂动态偏置，谁太忙调低谁的中选率，不用会伤主任务的辅助 loss |
-| `norm_topk_prob` | true | 选出的 6 个门控权重归一化到和为 1 |
-| `routed_scaling_factor` | 2.5 | 路由专家合并输出 × 2.5，配平与共享专家的贡献 |
-| `num_hash_layers` | 3 | 前 3 层用**哈希**定死 token→专家映射（不学习）。浅层学拼写级通用特征，定死更稳；V3 前 3 层是稠密 FFN，V4 连它们也 MoE 化 |
-| `hidden_act` / `swiglu_limit` | silu / 10.0 | SwiGLU 激活；输出钳 ±10 = **SwiGLU Clamping**，消 MoE 层异常值、防 loss spike |
-| `num_nextn_predict_layers` | 1 | MTP：顶上多接 1 层预测「下下个 token」，逼模型学前瞻表示；推理可做投机解码或直接丢弃 |
+| 字段                            | 值            | 含义                                                                           |
+| ----------------------------- | ------------ | ---------------------------------------------------------------------------- |
+| `n_routed_experts`            | 384          | 每层 384 个专家                                                                   |
+| `num_experts_per_tok`         | 6            | 每 token 挑 6 个，稀疏率 6/384 ≈ 1.6%                                               |
+| `n_shared_experts`            | 1            | 1 个必经的共享专家（学通用知识），路由专家学专门知识。每 token 实际过 7 个                                  |
+| `moe_intermediate_size`       | 3072         | 单专家中间维。一个专家 = SwiGLU 三矩阵（gate/up/down），各 `7168 × 3072`                       |
+| `scoring_func`                | sqrtsoftplus | 路由亲和度打分函数，V3 的 Sigmoid → V4 的 √Softplus(·)                                   |
+| `topk_method`                 | noaux_tc     | **无辅助损失负载均衡**（V3 首创）：给专家挂动态偏置，谁太忙调低谁的中选率，不用会伤主任务的辅助 loss                     |
+| `norm_topk_prob`              | true         | 选出的 6 个门控权重归一化到和为 1                                                          |
+| `routed_scaling_factor`       | 2.5          | 路由专家合并输出 × 2.5，配平与共享专家的贡献                                                    |
+| `num_hash_layers`             | 3            | 前 3 层用**哈希**定死 token→专家映射（不学习）。浅层学拼写级通用特征，定死更稳；V3 前 3 层是稠密 FFN，V4 连它们也 MoE 化 |
+| `hidden_act` / `swiglu_limit` | silu / 10.0  | SwiGLU 激活；输出钳 ±10 = **SwiGLU Clamping**，消 MoE 层异常值、防 loss spike              |
+| `num_nextn_predict_layers`    | 1            | MTP：顶上多接 1 层预测「下下个 token」，逼模型学前瞻表示；推理可做投机解码或直接丢弃                             |
 
 ## 五、mHC：残差连接的升级版
 
