@@ -299,4 +299,5 @@ decode 是 memory-bound 的——**搬一次权重只产出 1 个 token，算力
 - §八 的 SGLang 参数与文件路径核对自 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）；**参数名可能随版本变化，以 `--help` 为准**。
 - §1.1 的 ZeRO 三级划分见正文中的 ⚠️ 存疑标注。
 
-**NIXL**由 Nvidia Dynamo 分布式 LLM 推理框架创建，作为其键值 (KV) 传输解决方案。它采用模块化设计，包含多种传输后端，例如文件系统、POSIX 套接字和 RDMA 网络。它支持多种 RDMA 网络后端：一种基于高性能计算的通信库UCX，ling'yi'zhong
+**NIXL**由 Nvidia Dynamo 分布式 LLM 推理框架创建，作为其键值 (KV) 传输解决方案。它采用模块化设计，包含多种传输后端，例如文件系统、POSIX 套接字和 RDMA 网络。它支持多种 RDMA 网络后端：一种基于高性能计算的通信库UCX，另一种就是Mooncake TE。UCX 支持 AMD GPU。NIXL 提供的 API 与 NCCL/RCCL 截然不同，用于`read/write`KV 缓存导出节点和导入节点之间的操作。节点需要使用带外网络（例如 TCP 套接字或 ETCD 服务端点）导出其 KV 缓存的元数据，以便其他节点可以读取或写入 KV 数据。由于 KV 缓存以 GPU 直接 RDMA 的方式传输，因此它不会消耗 GPU SM 资源。
+**Mooncake TE**是 Moonshot AI 旗下 Kimi 服务平台的一个组件。它除了 NCCL/RCCL 之外，还拥有其他 API，与 NIXL 的风格非常相似`read/write`。它利用 GPU-Direct RDMA 直接传输键值缓存，而无需占用 GPU SM 资源。它还有一个很棒的功能，可以根据 PCIe 拓扑自动检测网卡和 GPU 的亲和性，这样应用程序就不需要为每个 GPU 指定使用哪个网卡。
