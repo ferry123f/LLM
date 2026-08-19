@@ -646,3 +646,10 @@ custom_ops注册机制：
 对模型层暴漏一个统一的算子（比如torch.ops.sglang.layernorm）,跟内置的torch.nn.functional.layer_norm用起来一样
 对torch.compile：这是我们注册的自定义算子，请当不透明黑盒处理，形状用我提供的fake_impl推。
 对硬件切换：模型代码不写if-else，注册机制在导入时根据当前平台绑到不同实现
+底层注册基础设施：
+	register_custom_op装饰器+CustomOpWrapper类+register_custom_op_form_extern
+	direct_register_custom_op(真正调用torch.library的函数，被上面调用)
+	register_custom_op
+上层平台分派基类：
+	MultiPlatformOp基类（提供forward_cuda/forward_hip/forward_native等钩子）
+	current_platform全局平台探测
