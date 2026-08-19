@@ -252,16 +252,16 @@ Prefill FLOPs        ≈ 2 × 参数量 × token 数
 
 ## 九、硬件事实 → 框架对策
 
-| 硬件事实 | SGLang 里的对策 |
-|---|---|
-| decode 是 memory-bound，算术强度 ≈ batch | `get_next_batch_to_run` 连续组批 |
-| KV cache 是显存头号消耗 | **RadixCache 前缀复用**、分页分配、`evict` |
-| 显存有限、超了就崩 | `--mem-fraction-static`、`retract`（踢回请求） |
-| HBM 往返昂贵 | FlashAttention / FlashInfer 等 attention backend |
-| 索引搬运也占带宽 | 到处的 **int32** |
-| TP 通信在关键路径上 | 节点内 TP、`distributed/device_communicators/` |
-| prefill 与 decode 性质相反 | **PD 分离**（`srt/disaggregation/`） |
-| CPU 内存比重算便宜 | HiCache 分层 KV offload |
+| 硬件事实                               | SGLang 里的对策                                     |
+| ---------------------------------- | ----------------------------------------------- |
+| decode 是 memory-bound，算术强度 ≈ batch | `get_next_batch_to_run` 连续组批                    |
+| KV cache 是显存头号消耗                   | **RadixCache 前缀复用**、分页分配、`evict`                |
+| 显存有限、超了就崩                          | `--mem-fraction-static`、`retract`（踢回请求）         |
+| HBM 往返昂贵                           | FlashAttention / FlashInfer 等 attention backend |
+| 索引搬运也占带宽                           | 到处的 **int32**                                   |
+| TP 通信在关键路径上                        | 节点内 TP、`distributed/device_communicators/`      |
+| prefill 与 decode 性质相反              | **PD 分离**（`srt/disaggregation/`）                |
+| CPU 内存比重算便宜                        | HiCache 分层 KV offload                           |
 
 ## See Also
 
