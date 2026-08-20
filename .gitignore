@@ -1,4 +1,13 @@
 .claudian/
-.claude/
+.claude/*
+!.claude/skills/
 .obsidian/workspace.json
 .obsidian/workspace-*.json
+
+# 机器专属配置：停止同步，两台电脑各自维护
+.obsidian/app.json
+.obsidian/appearance.json
+.obsidian/core-plugins.json
+.obsidian/community-plugins.json
+.obsidian/graph.json
+.obsidian/plugins/realclaudian/data.json
