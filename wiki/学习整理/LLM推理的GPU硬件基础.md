@@ -115,14 +115,14 @@ SGLang 的 `--mem-fraction-static` 就是划这条线的：**先给权重和静�
 
 ### 3.2 内存层级
 
-| 层级 | 容量（H100） | 延迟 | 带宽 |
-|---|---|---|---|
-| 寄存器 | 256 KB/SM | ~1 cycle | 极高 |
-| **Shared Memory / L1** | 228 KB/SM | ~20-30 cycle | ~10+ TB/s |
-| **L2** | 50 MB | ~200 cycle | ~5 TB/s |
-| **HBM（显存）** | 80 GB | ~400-800 cycle | 3.35 TB/s |
-| CPU 内存（PCIe 5.0） | TB 级 | ~微秒 | ~64 GB/s |
-| SSD | 更大 | 毫秒 | ~7 GB/s |
+| 层级                           | 容量（H100）  | 延迟             | 带宽        |
+| ---------------------------- | --------- | -------------- | --------- |
+| 寄存器                          | 256 KB/SM | ~1 cycle       | 极高        |
+| **Shared Memory（SMEM） / L1** | 228 KB/SM | ~20-30 cycle   | ~10+ TB/s |
+| **L2** cache                 | 50 MB     | ~200 cycle     | ~5 TB/s   |
+| **HBM（显存）**                  | 80 GB     | ~400-800 cycle | 3.35 TB/s |
+| CPU 内存（PCIe 5.0）             | TB 级      | ~微秒            | ~64 GB/s  |
+| SSD                          | 更大        | 毫秒             | ~7 GB/s   |
 
 **每往下一级，带宽掉一个量级。** 这解释了两件事：
 
@@ -252,24 +252,25 @@ Prefill FLOPs        ≈ 2 × 参数量 × token 数
 
 ## 九、硬件事实 → 框架对策
 
-| 硬件事实 | SGLang 里的对策 |
-|---|---|
-| decode 是 memory-bound，算术强度 ≈ batch | `get_next_batch_to_run` 连续组批 |
-| KV cache 是显存头号消耗 | **RadixCache 前缀复用**、分页分配、`evict` |
-| 显存有限、超了就崩 | `--mem-fraction-static`、`retract`（踢回请求） |
-| HBM 往返昂贵 | FlashAttention / FlashInfer 等 attention backend |
-| 索引搬运也占带宽 | 到处的 **int32** |
-| TP 通信在关键路径上 | 节点内 TP、`distributed/device_communicators/` |
-| prefill 与 decode 性质相反 | **PD 分离**（`srt/disaggregation/`） |
-| CPU 内存比重算便宜 | HiCache 分层 KV offload |
+| 硬件事实                               | SGLang 里的对策                                     |
+| ---------------------------------- | ----------------------------------------------- |
+| decode 是 memory-bound，算术强度 ≈ batch | `get_next_batch_to_run` 连续组批                    |
+| KV cache 是显存头号消耗                   | **RadixCache 前缀复用**、分页分配、`evict`                |
+| 显存有限、超了就崩                          | `--mem-fraction-static`、`retract`（踢回请求）         |
+| HBM 往返昂贵                           | FlashAttention / FlashInfer 等 attention backend |
+| 索引搬运也占带宽                           | 到处的 **int32**                                   |
+| TP 通信在关键路径上                        | 节点内 TP、`distributed/device_communicators/`      |
+| prefill 与 decode 性质相反              | **PD 分离**（`srt/disaggregation/`）                |
+| CPU 内存比重算便宜                        | HiCache 分层 KV offload                           |
 
 ## See Also
 
 - [[SGlang]] — 本文的硬件约束在框架层的具体实现：组批、RadixCache、attention backend、PD 分离。
 - [[LLM推理压测-bench serve 与 throughput 参数详解]] — 用压测验证本文的估算：TTFT 反映 prefill（compute-bound），TPOT/ITL 反映 decode（memory-bound）。
 - [[DeepSeek-V3 架构与低成本高效训练]] — MLA 如何从架构层面把 KV cache 压小；MoE「吃显存省算力」的典型。
+- [[LLM分布式]] — **本文 §五（多卡互联与并行策略）的展开**：DP/PP/TP/EP 各自的内部机制、集合通信原语与 Ring All-Reduce 的两阶段推导，以及量化与投机采样这两条不靠加卡的提速路。
 
-> 三篇构成闭环：**硬件原理（本文）→ 框架实现（SGlang）→ 压测验证（压测详解）**。
+> 三篇构成闭环：**硬件原理（本文）→ 框架实现（SGlang）→ 压测验证（压测详解）**；**[[LLM分布式]] 则是本文 §四、§五 往软件侧的延伸**。
 
 ## 备注
 

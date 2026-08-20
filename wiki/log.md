@@ -163,3 +163,92 @@
 - 呼应 `req_to_token` 用 int32 → 补链 [[LLM推理的GPU硬件基础]] 索引位宽一节（See Also 原本就有该条，此处为正文内联呼应）
 - raw 未涉及；`assets/_inbox` 本次为空，无需清理
 - 更新 index.md 摘要（Updated 仍为 2026-08-13）
+
+## [2026-08-14] query | Archived: DeepSeek-V4 config.json 逐项详解与显存估算
+- 素材：用户在对话中提供的 V4-Pro 与 V4-Flash 两份 config.json，追问「面向小白逐项讲清 + 公式与 KV cache 估算」
+- 新建 wiki/deepseek/DeepSeek-V4 config.json 逐项详解与显存估算.md（归档合成答案，不合并进已有文章）
+- 内容：字段按骨架/注意力/压缩注意力/长上下文/MoE/mHC/精度七组逐项解读；三笔账全程手算——总参 1.6T（385 专家×66M×61 层）、激活 49B、KV cache 基线 250 GB → MQA+latent 41 GB → 压缩条目 5.2 GB（≈2%，与论文数字互证）；部署估算 825 GB 权重需 8×H200；附 Flash 对比速览（三大创新未动、只砍尺寸、MoE 精确回退 V3 配置）
+- 存疑已标注：compress_ratios 的 4/128 归属、o_lora_rank、hc_eps、compress_rope_theta 为字段名推断；Flash 独有 dspark_* 四字段不明（疑似块级投机解码，待查 modeling 代码）；Flash compress_ratios 46 项 vs 44 层对不上
+- Updated: DeepSeek-V4 架构与百万上下文效率（See Also 补反向链接）
+
+## [2026-08-18] normalize | SGLang 架构与调度循环源码走读（注意力 Backend 深挖）
+- 用户在 §五 表格后裸贴了三个 backend 的走读笔记（制表符缩进、无结构、句末带「-》」箭头），本轮结构化并大幅补全
+- **所有说法均实扫本地仓库 `d:/project/sglang`（commit `fdebc938f7`，tag `v0.5.16`）核对后才落笔**，非训练知识
+- 章节改名：「五、注意力 Backend 选型」→「五、注意力 Backend：基类契约与三种实现」（原标题只覆盖选型表，已容不下内容）
+- **结构化**：裸文本拆成 5.1 可选 Backend 一览 / 5.2 基类契约 / 5.3 Triton / 5.4 FlashInfer / 5.5 TorchNative / 5.6 三者对比
+- **核对属实、予以保留的**：Triton 三索引数组语义（`kv_indices` 长条 / `kv_indptr` 段落分界 / `qo_indptr` extend 时 Q 分界）；Triton 构造四步；FlashInfer 构造四步（workspace / indptr buffer / wrapper / IndicesUpdater 适配层）与 plan/run 两阶段；TorchNative 逐请求 gather + SDPA、`_run_sdpa_forward_extend` 的七步循环（含「造带空位前缀的完整 Q」）
+- **补全（原笔记完全缺失——用户明说基类没写，要求补）**：
+  - **基类 `AttentionBackend` 三组契约**（`base_attn_backend.py`，260 行全读）：
+    ① `forward()` 由基类实现、按 `forward_mode` 分发到 `forward_decode` / `forward_extend` / `forward_mixed`（后者仅 `is_npu()` 走），idle 直接返回空张量——**三个钩子才是子类要填的空**
+    ② metadata 三方法契约 `init_forward_metadata` / `_out_graph(fb, in_capture)` / `_in_graph`，按「能否录进 CUDA Graph」切分；`_in_graph` 的 lint 契约明写禁用 `.item()` / `.cpu()` / `.tolist()` / 动态 shape `torch.empty()`
+    ③ 能力声明类属性 `needs_cpu_seq_lens`（Triton 覆盖为 `False`）/ `supports_ragged_verify_graph` / `use_captured_forward_metadata_for_breakable_cuda_graph` / `support_triton()`（TorchNative 覆盖为 `False`）/ `get_cuda_graph_seq_len_fill_value` / `get_indexer_metadata`
+  - 注册机制：`ATTENTION_BACKENDS` 字典 + `@register_attention_backend` 挂的是**工厂函数不是类**，故 `flashinfer` 可按 `use_mla_backend` 分流到 `FlashInferAttnBackend` / `FlashInferMLAAttnBackend`
+  - 点明 Triton 三索引数组即 **CSR（压缩稀疏行）布局**，`indptr` 长度恒 `bs+1`、由 `cumsum` 填出；补 `ForwardMetadata` 其余字段（`attn_logits`/`attn_lse`/`num_kv_splits`/`custom_mask`/`mask_indptr`/`window_*`）
+  - 补 Triton `init_forward_metadata` 三条 mode 分支的差异（decode 无 `qo_indptr`；target_verify 用 `arange` 等步长而非 cumsum，因草稿 token 数恒定）
+  - 补「为什么 plan/run 要分」：规划只依赖 batch 形状与 K/V 数值无关，plan 一次、几十层 run 复用 → 天然属「每批一次」
+  - 补 FlashInfer 三类 wrapper（Ragged / Paged-prefill+verify / Decode）与 `num_wrappers` 由滑动窗口决定
+  - **`plan_stream`（原笔记只留「关于 plan_stream」一句没写完）**：实为 `attention_registry.py:51-56` 里**仅当 `speculative_algorithm == "EAGLE"`** 才创建的独立 CUDA Stream，用于让 plan 与主 stream 计算重叠，使用点在 `speculative/eagle_worker_v2.py`
+  - 补 TorchNative 的定位（无编译期依赖 → 兜底与对拍基准）与源码自带的 `TODO: this loop process a sequence per iter, this is inefficient`
+  - 补「造带空位前缀的完整 Q」的**动因**：SDPA `is_causal=True` 按 Q/K 等长对齐推导掩码，故补齐后算完再裁掉前缀段
+- **新增 5.6 三者对比表**（用户明确要求「三者的一些对比学习」）：11 个维度横向对比 + 三条结论（复杂度与性能正相关 / 越快的 backend 越多工作被挪出 forward / 基类抽象经受住三种极端实现）
+- **纠正**：`init_forward_metedata` → `init_forward_metadata`（笔误）；`TorchNativeAttnBackend` 的 `init_forward_metadata` 原写「如果启用了 SWA kv pool…」属实但漏了它**几乎是空方法**这一关键对比点，已补
+- **交叉呼应**：§5.2 能力声明呼应 §4.2 `get_priority` 与 §4.5 `set_kv_buffer`（同为「变化点收进窄接口」）；§5.4 `plan_stream` 呼应 §三 `event_loop_overlap` 多 stream；§5.5 冗余 Q 呼应 §八 Detokenizer「全量减上下文」（同为「宁可重算不维护复杂状态」）；§5.6 结论 3 呼应 §六 国产卡注册机制
+- **存疑（标注未自动改）**：§5.4 末尾标 ⚠️——`plan_stream` 仅 EAGLE 路径创建，若用户当时读的是 `speculative/dflash_info_v2.py` 的 `_get_overlap_plan_stream` 则语境不同，待用户确认
+- 版本基准从「§四与§六」扩为「§四、§五与§六」；`release/v0.5.16 线` 改为准确的 `tag v0.5.16`
+- raw 未涉及；`assets/_inbox` 本次为空，无需清理
+- 更新 index.md 摘要与 Updated 日期 2026-08-13 → 2026-08-18
+
+## [2026-08-18] normalize | SGLang §五 补 Ragged KV 与 Paged KV 的区别
+- 用户读 §5.5 时注意到 FlashInfer 同时持有 ragged 与 paged 两种 wrapper，要求在合适位置补两者区别
+- **落点选择**：没有塞进 FlashInfer 小节，而是**新建 §5.2「前置概念：Ragged KV 与 Paged KV」**置于基类之前——因为这是「两种 KV 内存布局」的通用概念（Triton 的 CSR 也是 ragged），不是 FlashInfer 私有实现细节；原 5.2～5.6 顺延为 5.3～5.7
+- **新增 §5.2 内容**（均实扫核对，commit `fdebc938f7` / tag `v0.5.16`）：
+  - 两种布局 5 维对比表（物理形态 / 定位方式 / 间接层数 / 能否复用 / 类比）——核心是 **ragged 零间接、paged 过一层页表**
+  - 点明 **ragged 就是 §5.4 Triton 的 CSR 布局**，并区分「ragged」一词的两层用法（数据布局 vs FlashInfer wrapper 名）
+  - **为什么必须两者兼用**：extend 时 KV 有两个来源——历史前缀（早已在池中、可被共享，必然 paged）与本次新 token（刚算出的连续张量，天然 ragged）；只用 paged 会多一次「写入+间接寻址」往返，只用 ragged 则 RadixCache 前缀共享失效
+  - **代价与解法**：两半 softmax 分母不同不能直接相加，需各返回 LSE 再加权合并（`forward_return_lse` / `merge_state`）；点明这与 Triton split-KV（`attn_logits`/`attn_lse`/`num_kv_splits`）是同一套在线 softmax 机制
+- **§5.5 FlashInfer 内新增「extend 时 ragged 与 paged 如何分工」**：
+  - `use_ragged` 的成立条件（非确定性模式 且 不在 piecewise cuda graph 且 未设 `SGLANG_FLASHINFER_USE_PAGED`；多模态与 multi-item scoring 强制 `False`）
+  - **最硬的实证**：`update_single_wrapper` 里 `paged_kernel_lens` 在 `use_ragged=True` 时取 `prefix_lens`、否则取 `seq_lens`——一行代码即证明「开 ragged 时 paged 只管旧的那半截」
+  - 两条子路径：`extend_no_prefix=True` 时只调 ragged 一次；有前缀命中时两 wrapper 各算一半再 `_safe_merge_state` 合并
+  - **点出 `causal` 取值分裂**：ragged 半 `causal=True`（新 token 互相看，存在未来需遮）、paged 半 `causal=False`（新 token 看历史，不存在未来，遮反而错）——用以说明两半是数学上精确切开的
+  - 补 **KV 写入时机差异**：`use_ragged=False` 必须先 `set_kv_buffer` 再算（paged wrapper 要从池中读新 token KV）；`use_ragged=True` 则算完才写（写池仅为后续请求留缓存）
+- 细化 §5.5 构造函数第 3 步的 wrapper 清单，补 **decode 只有 paged wrapper** 及其原因（每步仅加 1 token，无「一批新 token」可言）
+- §5.7 对比表新增「KV 布局」一行
+- 修正 §六 引言遗留的 `release/v0.5.16 线` → `tag v0.5.16`，与文末备注统一
+- 全文 573 → 643 行；§五 交叉引用（§5.2→§5.5/§5.4、§4.5、§三、§六、§八）全部复核自洽
+- 更新 index.md 摘要（补 ragged/paged 要点）
+
+## [2026-08-19] normalize | SGLang 新增 §六 算子层：custom_op 注册与多平台分派
+
+用户在文末粘了一段 custom_op 注册机制的原始笔记（tab 缩进、无结构）。全部实扫 `d:/project/sglang`（commit `fdebc938f7`，tag `v0.5.16`）核对后，重写成独立的 §六，放在 §五（注意力 Backend）之后、原 §六（国产 GPU/NPU 适配）之前——理由：它是「注意力这一类算子」再往下一层的**通用算子**抽象，且直接给下一节的硬件适配打底（dispatch key / OOT 注册口）。原 §六/七/八 顺延为 §七/八/九，全文 §x 交叉引用与备注版本基准行同步改过。
+
+- 纠正拼写：`register_custom_op_form_extern` → **`register_custom_op_from_extern`**（`utils/custom_op.py:197`），按错名字 grep 不到。
+- 纠正表述：笔记写「注册机制在**导入时**根据当前平台绑到不同实现」。实为**两条独立的线、两个不同时机**——`direct_register_custom_op` 在注册那刻（import 期）挑 dispatch key；`MultiPlatformOp` 在对象 `__init__` 那刻定 `_forward_method`。共同点是都**不在每次 forward 现判**，运行时零分支。已拆成 6.1 的表 + 提示块讲清。
+- 补全笔记未写的部分：`out_shape` 可以是 `int` 也可以是 `str`（源码 `bound.args[i]` vs `bound.arguments[name]` 两条取值路径）；4 个 `@overload` 只为类型检查器存在；`real_impl` 最终返回的是 `debug_torch_op(...)`，日志关闭时**它就是 `torch.ops.sglang.<op_name>` 本身**——这才是「对 torch.compile 是黑盒」的落点；`mutates_args` 的真实作用是喂给 `infer_schema` 让编译器不敢重排/消除该 op。
+- 补全笔记只写了名字的 `register_custom_op_from_extern`：它**不是装饰器是普通函数**；两个独有参数 `out_dtype`（fp8 入 bf16 出这类）与 `computed_args`（把随 batch 变的参数移出 schema，**防 torch.compile 反复重编译**，为此要手工搬 `__name__`/`__signature__`/`__annotations__`）；幂等、无懒注册；树内仅 5 处调用。
+- 补全笔记只写了一句的 `direct_register_custom_op`：不在 `custom_op.py` 而在 `utils/common.py:2514`；docstring 明说「优先用 register_custom_op」；为什么不用 `torch.library.custom_op`（通用分派开销大）；`sglang_lib = Library("sglang", "FRAGMENT")` 与算子生命周期绑定；五步（查重→infer_schema→define→impl→_register_fake）；**第四步按平台挑 dispatch key 的四行分支**（npu→`PrivateUse1` / xpu→`XPU` / musa→`MUSA` / 其余→`CUDA`），这条是和 §七 昇腾适配的接头；错误处理只吞「多引擎重复注册」那一种 RuntimeError、AttributeError 一律重抛。
+- 补全笔记只有一行的 `MultiPlatformOp`：完整钩子回退表（**hip/musa 默认落 `forward_cuda`，其余落 `forward_native`**，方向不对称是因为 HIP/MUSA 的 API 贴近 CUDA）；`dispatch_forward()` 先判树外平台再走树内链；CPU 那支要求 `_is_cpu_amx_available`；`register_oot_forward` 是给树外插件的注入口（对应 §七 的 `SGLANG_PLATFORM` entry_point）；树内 21 个子类清单；`SiluAndMul` 六套实现的实例；子类可在 `__init__` 直接改写 `_forward_method` 覆盖分派（RL 复现、aiter）。
+- **新增笔记完全没有的 6.7**：`MultiPlatformOp` 的第二身份是 `torch.compile` 开关（`enter/leave_torch_compile` + `torch_compile_decoration.py:_to_torch` 递归遍历）。由此点出两条线对编译器的**相反策略**——底层把 kernel 藏成不透明黑盒**绕开**编译器，`MultiPlatformOp` 反而把厂商 kernel 换成 `forward_native` **迎合**编译器，判据是该算子值不值得被 Inductor 融合。附两处补丁痕迹：FusedMoE/TopK 仅 `num_tokens == 1` 才切 native；`is_torch_compile` 幂等守卫是为 `RotaryEmbedding` 这类被多层复用的对象准备的。
+- 级联：`wiki/index.md` 条目补 custom_op 段并把 Updated 改到 2026-08-19。
+- 无新增存疑项；§五 里 `plan_stream` 那条旧的 ⚠️ 仍待用户确认。
+
+## [2026-08-19] normalize | LLM分布式：结构化重写 + 与 GPU 硬件基础打通
+- 原文 52 行无标题的流水笔记 → 301 行八节结构：并行策略 / 通信原语 / 通信代价 / 训练 vs 推理 / SM-Warp / 量化 / 投机采样 / SGLang 落点
+- **assets 归位**：`_inbox` 20 张图 → 16 张按 `dist-<对象>-<内容>.png` 改名进 `assets/学习整理/`，笔记内 16 处引用同步换成短链；3 张 md5 相同且无人引用的重复图删除，`_inbox` 清空
+- **补全 Ring All-Reduce**：原文只有一个知乎裸链接，用 4 张原本没被引用的 `_inbox` 图补出 scatter-reduce + all-gather 两阶段完整讲解，并点出「通信量与卡数无关」
+- **修复投机采样表**：原为终端 ASCII 制表符粘贴，顶边框丢失、MTP 一行文字截断，重排为 markdown 表并补回「EAGLE 式 draft 用」，观点未增删
+- **与 [[LLM推理的GPU硬件基础]] 结合**：重叠部分（SM/warp 层级、精度格式、互联带宽、并行通信代价）改为交叉引用而非重述；新增该篇没有的「训练 vs 推理地位重排」对照表，并把 TP 的推理收益接到那篇「decode 速度上限 = 带宽 ÷ 权重字节」的结论上
+- 补充（原文只有名词或一句话的）：参数服务器瓶颈成因、ZeRO 三级、气泡占比公式、1F1B 省的是显存不是气泡、Megatron「列→行」配对、EP 负载不均、八原语的组合关系表、AWQ 与 GPTQ 的路线分野、W4 与 W8A8 在 decode/prefill 上的不同
+- 核对：SGLang 参数（`--tp/pp/dp/ep-size`、`--enable-dp-attention`、`--moe-a2a-backend`、`--pp-max-micro-batch-size`、`--speculative-*`）与 `distributed/` 目录均实扫自 `d:/project/sglang` commit fdebc938f7（tag v0.5.16）；`--speculative-algorithm` 实际内置 7 种（含 NEXTN/DFLASH/DSPARK），已按源码写全
+- 级联：`wiki/index.md` 补上该篇条目（此前完全缺失）；`LLM推理的GPU硬件基础.md` See Also 加反向链接
+- 新增 2 处 ⚠️ 存疑：ZeRO 三级划分的出处、「先量化再加卡更划算」与「投机采样摊薄 All-Reduce」两条是我推的串联而非笔记原意
+
+## [2026-08-19] normalize | 国产 GPU/NPU 适配独立成篇
+- 新建 `wiki/学习整理/国产GPU与NPU适配.md`（213 行），内容抽自 `SGlang.md` §七
+- `SGlang.md` §七 由 91 行压成 26 行的概览（三个落点 + 现状表 + 与 §6.5/§6.6 的接头），保留章节号使 §八/§九 不移位；818 → 755 行
+- **抽出时核对源码，修正两处旧数字**：昇腾文档 16 篇 → 18 篇 .mdx + 3 子目录；NPU CI「5 条」→ 8 条（原文正文已列 8 条、汇总表写 5 条，自相矛盾）
+- **补上原先漏记的两块**：`srt/platforms/` 平台抽象层（`interface.py` + `device_mixin.py`，约 30 个方法，树内实现 cuda/rocm/cpu）；`srt/models/mindspore.py` + `mindspore_backend.mdx` 揭示的 **CANN + MindSpore** 框架接入线（实现在独立包 `sgl-mindspore`，支持 Qwen3 与 DeepSeek V3/R1）
+- **纠正一处路径不准**：树外插件加载器原写作 `srt/plugins/`，实际选择逻辑在 `srt/platforms/__init__.py::_resolve_platform()`；`srt/plugins/__init__.py` 只定义两个 entry_point 组名（`sglang.srt.platforms` / `sglang.srt.plugins`）
+- 新增（原文没有的）：`SGLANG_PLATFORM` 设置/未设置两条分支的完整流程与六档 fallback 链、front-loading filter 为什么要「先按名过滤再 import」、MUSA 走「重编译 CUDA」vs 昇腾「重写实现」的路线对比、§八 待补充清单
+- 级联：`index.md` 补新条目并改写 SGlang 条目末段；`SGlang.md` 内 5 处 §七 交叉引用改为指向新篇；两篇 See Also 互链
+- 边界声明：新篇 §一（CUDA 三层生态）标注为背景铺垫非实扫；全篇只有代码量证据，**无任何性能实测**

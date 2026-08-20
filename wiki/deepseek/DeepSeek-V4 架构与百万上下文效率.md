@@ -186,6 +186,7 @@ flowchart TB
 ## See Also
 
 - [DeepSeek-V3 架构与低成本高效训练](DeepSeek-V3%20架构与低成本高效训练.md) — 上一代：MLA 低秩注意力 + DeepSeekMoE + 无辅助损失负载均衡 + MTP，用 FP8/DualPipe 把 671B 模型训练成本压到 $5.576M。V4 直接继承其 DeepSeekMoE 与 MTP，并把注意力、残差、优化器、后训练全面升级。
+- [DeepSeek-V4 config.json 逐项详解与显存估算](DeepSeek-V4%20config.json%20逐项详解与显存估算.md) — 本文机制的**数值落地**：Pro/Flash 两份 config 逐字段解读 + 参数量/KV cache/部署卡数三笔账（含「KV ≈ 基线 2%」的手算验证）。
 
 ## Sources
 
