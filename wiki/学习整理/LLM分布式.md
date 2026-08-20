@@ -1,6 +1,6 @@
 # LLM 分布式：并行策略、通信原语与推理侧对策
 
-单卡装不下、或者装得下但算不快时，就要把模型和数据摊到多张卡上。这篇从外往里讲四层：**四种并行策略**（DP/PP/TP/EP）与它们**共用的通信原语** → **通信代价怎么由硬件决定** → **一张卡内部的 SM/Warp 调度** → **量化与投机采样这两条不靠加卡的提速路**。
+单卡装不下、或者装得下但算不快时，就要把模型和数据摊到多张卡上。这篇从外往里讲：**四种并行策略**（DP/PP/TP/EP）与它们**共用的通信原语** → **通信代价怎么由硬件决定** → **PD 分离那条不走 NCCL 的 KV 传输链路**（NIXL / Mooncake TE） → **一张卡内部的 SM/Warp 调度** → **量化与投机采样这两条不靠加卡的提速路**。
 
 贯穿全篇的一条线：**推理场景和训练场景对这套东西的取舍完全不同**，所以每一节都会回到「在推理里它还成不成立」。
 
@@ -198,7 +198,108 @@ decode 是 **memory-bound** 的，耗时约等于「把权重从 HBM 搬一遍�
 
 > **代价当然是那两次 All-Reduce**。所以 TP 的收益曲线是先升后降：卡越多每卡搬得越少，但同步开销越大。实践上单节点 8 卡以内 TP 通常划算，跨节点就要让位给 PP/DP。
 
-## 五、单卡内部的并行：SM / Warp / Block
+## 五、KV 传输：PD 分离撑起的第五条链路
+
+前四节的通信都发生在**同一个推理实例内部**——TP 的 All-Reduce、EP 的 all-to-all，参与方是同一批权重的几张卡。**PD 分离（prefill / decode 分开部署）引入了一条性质完全不同的链路**：prefill 实例算完的 KV cache，要整块搬给另一台机器上的 decode 实例。
+
+**为什么它不能复用 NCCL**：集合通信的前提是「一组固定的 rank 步调一致地参与同一次操作」。而 PD 之间是**动态、点对点、单向**的——哪个 prefill 实例发给哪个 decode 实例由调度时才决定，两边的 batch 互不相干，谁也不能等谁。这是 `read/write` 式**单边传输（one-sided）**的场景，不是 collective 的场景。
+
+于是出现了专门的 **KV 传输引擎**，SGLang 里的两条主线是 **NIXL** 和 **Mooncake TE**。
+
+### 5.1 两者的共同设计
+
+它们的 API 风格高度相似，都不是 NCCL 那套 `all_reduce(tensor)`，而是：
+
+| 步骤 | 做什么 |
+|---|---|
+| **注册内存** | 把 KV cache 的显存地址段登记给引擎（`register_memory` / `batch_register`），让网卡能直接访问 |
+| **交换元数据** | 通过**带外通道**（TCP / ZMQ / HTTP bootstrap / etcd）把「我的哪块显存在哪个地址」告诉对端 |
+| **单边读写** | 直接对**对端地址**发起 `read` / `write`，**对端 CPU 不参与** |
+
+**两条共同的关键性质**：
+
+1. **走 GPU-Direct RDMA**——数据从本机显存直接进网卡、直接落到对端显存，**不经过 CPU 内存中转**。
+2. **不占用 GPU SM 资源**——搬运由网卡（DMA 引擎）完成，GPU 该算什么算什么。这一点和 §六 说的「NCCL 通信 kernel 要占 SM」形成鲜明对比：**集合通信要 GPU 出工，KV 传输不用**。
+
+> **第 2 条是 PD 分离能成立的前提**。如果搬 KV 要占 SM，那 prefill 机器一边算一边发就会自己拖慢自己，PD 分离的收益会被吃掉一大截。
+
+**元数据必须走带外**，是这类设计的共同约束：RDMA 要写对端地址，就必须先知道对端地址，而这个「先知道」本身没法用 RDMA 完成。SGLang 的做法是 prefill 侧起一个 **bootstrap server**（`--disaggregation-bootstrap-port`，默认 8998，`common/conn.py` 里是个 aiohttp 应用），decode 侧用 HTTP 去查路由，再用 ZMQ 交换具体的地址与句柄。
+
+### 5.2 NIXL
+
+**由 NVIDIA 在 Dynamo 分布式推理框架里创建，作为其 KV 传输方案。** 特点是**模块化的后端设计**：文件系统、POSIX、对象存储、RDMA 网络都是可插拔的 backend。
+
+RDMA 这条路它支持多种后端，其中包括**UCX**（高性能计算领域的通信库，**支持 AMD GPU**）和 **Mooncake TE**——也就是说 **NIXL 可以把 Mooncake 当成自己的一个后端**，两者不完全是并列关系。
+
+SGLang 里的落点（`srt/disaggregation/nixl/conn.py`，约 2700 行）：
+
+| 环节 | 代码 |
+|---|---|
+| 创建 agent | `nixl_agent(uuid, agent_config)`，backend 由 `SGLANG_DISAGGREGATION_NIXL_BACKEND` 选，**默认 `UCX`** |
+| 注册显存 | `agent.register_memory(addrs, "VRAM")`；辅助数据用 `"DRAM"` |
+| 认识对端 | `agent.add_remote_agent(metadata)`，metadata 由 `get_agent_metadata()` 导出后经 ZMQ 送过去 |
+| 发起传输 | `initialize_xfer` / `make_prepped_xfer` → `agent.transfer(handle)` |
+
+> **实扫的一个细节**：这份实现里 `initialize_xfer` / `make_prepped_xfer` 的方向参数**全部是 `"WRITE"`，一处 `"READ"` 都没有**（grep 零命中）。即 SGLang 走的是 **prefill 主动把 KV 推给 decode**，而不是 decode 去拉。这和「谁先就绪谁发起」的直觉一致——prefill 算完才有数据，让它推最省一轮握手。
+
+NIXL 在 SGLang 里**不只用于 PD 分离**，还有另外两处：HiCache 的存储后端（`mem_cache/storage/nixl/`，用 POSIX/GDS/3FS/对象存储这些**非 RDMA** 插件把 KV 落到磁盘或对象存储）、以及 MoE 的 `token_dispatcher/nixl.py`（`nixl_ep`）。**这正是它「模块化后端」设计的红利**——同一套 API，换个插件就从「跨机搬显存」变成「往磁盘落盘」。
+
+### 5.3 Mooncake TE
+
+**Moonshot AI 旗下 Kimi 服务平台的组件**。API 风格与 NIXL 非常相似，同样是 `read/write` 而非 NCCL 式集合操作，同样用 **GPU-Direct RDMA** 直传 KV cache、**不占用 GPU SM**。
+
+**它有一个很好的特性：能根据 PCIe 拓扑自动检测网卡与 GPU 的亲和性**，这样应用不需要为每个 GPU 手动指定用哪张网卡。
+
+> **对应到 SGLang 的参数**：`--disaggregation-ib-device` 支持三种写法——单设备 `mlx5_0`、共享列表 `mlx5_0,mlx5_1`、**每 GPU 的 JSON 映射** `{"0": "mlx5_0,mlx5_1", "1": "mlx5_2"}`（还可以给 JSON 文件路径）。而**留空（默认 None）时就触发 mooncake 的自动探测**——上面那句「不需要手动指定」在参数层面的落点，就是这个默认值。
+
+SGLang 里的落点：
+
+| 环节 | 代码 |
+|---|---|
+| 引擎封装 | `srt/distributed/device_communicators/mooncake_transfer_engine.py` 的 `MooncakeTransferEngine`，包住 `mooncake.engine.TransferEngine` |
+| 初始化 | `engine.initialize(hostname, "P2PHANDSHAKE", protocol, device_name)`，protocol 默认 `rdma`，可换 `efa`（AWS）/ `tcp` |
+| 注册显存 | `batch_register(ptrs, lens)` |
+| 传输 | `batch_transfer_sync_write(session_id, src_addrs, dst_addrs, lengths)`——**同样是 write 方向** |
+| 会话标识 | `session_id` = `host:rpc_port`，不是 rank 号——**印证了「点对点、不是集合通信」** |
+
+**两个 SGLang 特有的补充**：
+
+- **`mooncake_tcp` 是同一个后端的降级模式**：`arg_groups/pd_disaggregation_hook.py` 里把它改写成 `mooncake` 并设 `MC_FORCE_TCP=1`，同时**清空 ib_device**（TCP 路径下选 HCA 没有意义）。没有 RDMA 网卡的环境靠它把 PD 分离跑起来。
+- **自定义显存池**：`SGLANG_MOONCAKE_CUSTOM_MEM_POOL` 可选 `NVLINK` / `BAREX` / `INTRA_NODE_NVLINK`，用 mooncake 自己的 allocator 建 `torch.cuda.MemPool`。**这是把「显存怎么分配」也交给传输引擎**——分配时就让这块显存对网卡友好，省掉后续注册或拷贝。
+
+### 5.4 SGLang 里的全部 KV 传输后端
+
+`--disaggregation-transfer-backend`（`server_args.py:233` 的 `DISAGG_TRANSFER_BACKEND_CHOICES`）：
+
+| 取值 | 说明 |
+|---|---|
+| **`mooncake`** | **默认值** |
+| `mooncake_tcp` | 同上，强制 TCP，无 RDMA |
+| **`nixl`** | 默认 UCX 后端 |
+| `mori` | 依赖外部 `mori.io` 包 |
+| `ascend` | 昇腾专用，见 [[国产GPU与NPU适配]] §4.2 |
+| `fake` | 测试用桩，不真传 |
+
+分派逻辑在 `disaggregation/utils.py` 的 `get_kv_class(transfer_backend, class_type)`：每个后端都要提供 **KVManager / KVSender / KVReceiver / KVBootstrapServer** 四个类，共用 `common/conn.py` 的基类。**这是和 §九 那些 `device_communicators/` 并列的第二套通信抽象**——一套管集合通信，一套管 KV 搬运。
+
+> `DISAGG_TRANSFER_BACKEND_CHOICES` 旁边还有个 `add_disagg_transfer_backend_choices()` 函数，**给树外插件追加自己的后端名**——和 [[国产GPU与NPU适配]] §六 的插件哲学是同一套路子。
+
+### 5.5 放回全篇的位置
+
+| | TP / EP 的集合通信 | PD 的 KV 传输 |
+|---|---|---|
+| **参与方** | 固定一组 rank，步调一致 | 动态点对点，两端独立 |
+| **API 形态** | `all_reduce` / `all_to_all` | `read` / `write` 单边 |
+| **元数据** | 建组时就定了 | **必须带外交换**（bootstrap / ZMQ） |
+| **占 SM 吗** | **占**（NCCL kernel 要 GPU 出工） | **不占**（网卡 DMA） |
+| **典型链路** | NVLink（节点内） | RDMA / IB（跨节点） |
+| **怕什么** | 延迟（每层都要等） | 带宽与 KV 体积 |
+
+**一句话**：前者是「**同一个模型的几张卡凑在一起算一步**」，后者是「**一个请求的中间产物从一台机器搬到另一台**」。名字里都有「通信」，但约束、API 和硬件路径都不一样，**放在一起对照才不容易混**。
+
+> ⚠️ 存疑：5.1 那张「三步」表、以及「不能复用 NCCL 是因为 collective 要求固定 rank 步调一致」这个解释，是我按两边 API 形态归纳的，**不是你笔记里的原话**。方向上和源码一致（session_id 用 host:port、元数据走 bootstrap+ZMQ 都是实扫到的），但当成教科书定义引用前最好再核一手。
+
+## 六、单卡内部的并行：SM / Warp / Block
 
 前四节讲的是**卡与卡之间**怎么拆。往下一层，**一张卡内部**也是大规模并行的，这层的调度单位是 SM 和 Warp。
 
@@ -222,7 +323,7 @@ decode 是 **memory-bound** 的，耗时约等于「把权重从 HBM 搬一遍�
 
 > 更细的层级（CUDA Core / Tensor Core、寄存器 / SMEM / L2 / HBM 的容量与延迟）见 [[LLM推理的GPU硬件基础]] §4.1 与 §4.3，本篇不重复。
 
-## 六、量化推理：W8A8 / AWQ / GPTQ / FP8
+## 七、量化推理：W8A8 / AWQ / GPTQ / FP8
 
 模型权重默认 fp16/bf16（每个数 2 字节）。**量化 = 用更少的比特存**（int8 1 字节、int4 半字节）。收益有**两层**：
 
@@ -247,7 +348,7 @@ decode 是 **memory-bound** 的，耗时约等于「把权重从 HBM 搬一遍�
 **和分布式的关系**：量化和 TP 是**同一个方向上的两种手段**——都在减少「每张卡每步要搬的权重字节」。两者可以叠加（FP8 权重 + TP=4，每卡搬 1/8），但 TP 要付 All-Reduce 的通信代价，量化要付精度代价。
 
 
-## 七、投机采样（Speculative Decoding）
+## 八、投机采样（Speculative Decoding）
 
 decode 是 memory-bound 的——**搬一次权重只产出 1 个 token，算力大量闲置**。投机采样的思路：用一个**便宜的方式先猜若干个 token**，再让大模型**一次性并行验证**这几个。猜对了就白赚，猜错了从错的那个位置截断重来，**结果分布与原模型完全一致**（靠拒绝采样保证）。
 
@@ -268,7 +369,7 @@ decode 是 memory-bound 的——**搬一次权重只产出 1 个 token，算力
 
 > **[[SGlang]] 里的对应**：`--speculative-algorithm` 内置 `EAGLE` / `EAGLE3` / `NEXTN` / `STANDALONE` / `NGRAM` / `DFLASH` / `DSPARK`（还可以用 `SpeculativeAlgorithm.register` 注册树外算法），配 `--speculative-num-steps`（草稿走几步）、`--speculative-eagle-topk`（每步几个分支）、`--speculative-num-draft-tokens`（一次 verify 几个）。那篇 §五 还讲到 EAGLE 路径下 FlashInfer 会额外开一条 `plan_stream`，把草稿多步的 plan 挪出关键路径。
 
-## 八、在 SGLang 里的落点
+## 九、在 SGLang 里的落点
 
 > 以下核对自本地仓库 `d:/project/sglang`（commit `fdebc938f7`，tag `v0.5.16`）。
 
@@ -288,16 +389,14 @@ decode 是 memory-bound 的——**搬一次权重只产出 1 个 token，算力
 ## See Also
 
 - [[LLM推理的GPU硬件基础]] — **本篇的硬件底座**：互联带宽表、显存构成、decode 是 memory-bound 的推导。本篇 §三、§四的所有结论都由那篇的数字支撑。
-- [[SGlang]] — 本篇 §八 的展开：`distributed/` 目录、PD 分离、以及通信算子如何被注册成 custom op。
+- [[SGlang]] — 本篇 §九 的展开：`distributed/` 目录、以及通信算子如何被注册成 custom op；本篇 §五 的 PD 分离在那篇也有调度侧的对应。
 - [[DeepSeek-V3 架构与低成本高效训练]] — EP 负载均衡（无辅助损失）与 DualPipe（PP 气泡优化）的工业级实例；MLA 则是从架构层减小 KV cache 而非靠并行。
 - [[LLM推理压测-bench serve 与 throughput 参数详解]] — 用压测验证 TP 的实际收益。
 
 ## 备注
 
 - 本文的并行策略、通信原语、SM/Warp、量化与投机采样各节整理自学习笔记与配图；**图为示意，非某一框架的实际实现**。
-- §七 的投机采样表原为终端 ASCII 制表符绘制，顶边框缺失、MTP 一行被截断，已重排为 markdown 表并补回截断文字，**观点未增删**。
-- §八 的 SGLang 参数与文件路径核对自 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）；**参数名可能随版本变化，以 `--help` 为准**。
+- §八 的投机采样表原为终端 ASCII 制表符绘制，顶边框缺失、MTP 一行被截断，已重排为 markdown 表并补回截断文字，**观点未增删**。
+- §五、§九 的 SGLang 参数与文件路径核对自 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）；**参数名可能随版本变化，以 `--help` 为准**。
 - §1.1 的 ZeRO 三级划分见正文中的 ⚠️ 存疑标注。
-
-**NIXL**由 Nvidia Dynamo 分布式 LLM 推理框架创建，作为其键值 (KV) 传输解决方案。它采用模块化设计，包含多种传输后端，例如文件系统、POSIX 套接字和 RDMA 网络。它支持多种 RDMA 网络后端：一种基于高性能计算的通信库UCX，另一种就是Mooncake TE。UCX 支持 AMD GPU。NIXL 提供的 API 与 NCCL/RCCL 截然不同，用于`read/write`KV 缓存导出节点和导入节点之间的操作。节点需要使用带外网络（例如 TCP 套接字或 ETCD 服务端点）导出其 KV 缓存的元数据，以便其他节点可以读取或写入 KV 数据。由于 KV 缓存以 GPU 直接 RDMA 的方式传输，因此它不会消耗 GPU SM 资源。
-**Mooncake TE**是 Moonshot AI 旗下 Kimi 服务平台的一个组件。它除了 NCCL/RCCL 之外，还拥有其他 API，与 NIXL 的风格非常相似`read/write`。它利用 GPU-Direct RDMA 直接传输键值缓存，而无需占用 GPU SM 资源。它还有一个很棒的功能，可以根据 PCIe 拓扑自动检测网卡和 GPU 的亲和性，这样应用程序就不需要为每个 GPU 指定使用哪个网卡。
+- **§五 由文末两段原始笔记扩写而成**：原文是 NIXL 与 Mooncake TE 各一段的裸文字（贴在 §备注 之后），观点全部保留并接上了 SGLang 的源码落点；原段落已删除，避免同一内容两处并存。
