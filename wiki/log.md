@@ -252,3 +252,14 @@
 - 新增（原文没有的）：`SGLANG_PLATFORM` 设置/未设置两条分支的完整流程与六档 fallback 链、front-loading filter 为什么要「先按名过滤再 import」、MUSA 走「重编译 CUDA」vs 昇腾「重写实现」的路线对比、§八 待补充清单
 - 级联：`index.md` 补新条目并改写 SGlang 条目末段；`SGlang.md` 内 5 处 §七 交叉引用改为指向新篇；两篇 See Also 互链
 - 边界声明：新篇 §一（CUDA 三层生态）标注为背景铺垫非实扫；全篇只有代码量证据，**无任何性能实测**
+## [2026-08-20] normalize | LLM分布式：新增 §五 KV 传输（NIXL / Mooncake TE）
+- 文末两段裸笔记（NIXL、Mooncake TE 各一段，贴在 §备注 之后）扩写成独立的 §五，插在 §四（推理场景）与原 §五（SM/Warp）之间——理由：它和前四节同属「卡间通信」，但走的是另一条链路，接在推理场景之后最顺；原 §五～§八 顺延为 §六～§九，全文 §x 交叉引用、开篇导语（四层→五层）与备注同步改过
+- **原文观点全部保留**：Dynamo 出身、模块化后端（文件系统/POSIX/RDMA）、UCX 与 Mooncake TE 都是其 RDMA 后端、UCX 支持 AMD GPU、read/write 而非 NCCL 风格、元数据走带外（TCP/ETCD）、GPU-Direct RDMA 不占 SM、Kimi 出身、按 PCIe 拓扑自动检测网卡亲和性
+- **补上原文没有的源码落点**（实扫 `d:/project/sglang`，commit `fdebc938f7`，tag `v0.5.16`）：`disaggregation/{nixl,mooncake}/conn.py` 的注册/元数据/传输三步 API；NIXL 默认后端是 **UCX**（`SGLANG_DISAGGREGATION_NIXL_BACKEND`）；`MooncakeTransferEngine.initialize(..., "P2PHANDSHAKE", protocol, ...)` 默认 `rdma`；`get_kv_class()` 要求每个后端提供 KVManager/Sender/Receiver/BootstrapServer 四件套
+- **实扫发现的两条原文没有的细节**：① NIXL 路径下 `initialize_xfer`/`make_prepped_xfer` 的方向参数**全是 `"WRITE"`，`"READ"` 零命中**——SGLang 走 prefill 主动推；② mooncake 的 `session_id` 是 `host:rpc_port` 而非 rank 号，印证「点对点、非集合通信」
+- **把「自动检测网卡亲和性」接到参数层**：`--disaggregation-ib-device` 留空（默认 None）才触发 mooncake 自动探测，显式指定支持单设备/逗号列表/每 GPU JSON 映射/JSON 文件四种写法
+- 补全后端全表：`mooncake`（默认）/ `mooncake_tcp`（`MC_FORCE_TCP=1` 且清空 ib_device 的降级路径）/ `nixl` / `mori` / `ascend` / `fake`，另有 `add_disagg_transfer_backend_choices()` 供树外插件追加
+- 补 5.5 与集合通信的六项对照表（参与方 / API 形态 / 元数据 / 占不占 SM / 典型链路 / 怕什么），并点出「NCCL 占 SM、KV 传输不占」是 PD 分离能成立的前提
+- 级联：`index.md` 条目补 §五 段并把「四层」改成「五层」、Updated 改到 2026-08-20；两处 §x 备注跟着renumber
+- 新增 1 处 ⚠️ 存疑：5.1 的「三步」归纳与「collective 要求固定 rank 步调一致所以不能复用 NCCL」是我按 API 形态推的解释，非笔记原意
+- 未决：`mori` 后端的厂商归属在本仓库内没有直接证据（只有 `mori.io` / `mori.cpp` 的 import），故正文只写「依赖外部 mori 包」，未标厂商

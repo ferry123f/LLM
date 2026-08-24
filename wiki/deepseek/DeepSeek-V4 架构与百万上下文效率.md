@@ -46,11 +46,11 @@
 
 **图解——两条压缩注意力的核心结构（论文 Figure 3 / Figure 4）：**
 
-**CSA**：Token-Level Compressor 把每 *m* 个 KV 压成 1 条 → Lightning Indexer（自己也有一路压缩 + Multi-Query Attention）打分选 top-k → 与滑动窗口 KV 拼接 → Shared-KV MQA：
+**CSA**：Token-Level Compressor 把每 *m* 个 KV 压成 1 条 → Lightning Indexer（自己也有一路压缩 + Multi-Query Attention）打分选 top-k → 与滑动窗口 KV 拼接 → Shared-KV MQA：![[Pasted image 20260824090812.png]]
 
 ![[deepseek-v4-csa.png]]
 
-**HCA**：结构类似但压得更狠（*m′ ≫ m*），且**不做 top-k 稀疏选择**（无 Lightning Indexer 分支），压完直接稠密注意力：
+**HCA**：结构类似但压得更狠（*m′ ≫ m*），且**不做 top-k 稀疏选择**（无 Lightning Indexer 分支），压完直接稠密注意力：![[Pasted image 20260824090757.png]]
 
 ![[deepseek-v4-hca.png]]
 
