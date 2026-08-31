@@ -263,3 +263,16 @@
 - 级联：`index.md` 条目补 §五 段并把「四层」改成「五层」、Updated 改到 2026-08-20；两处 §x 备注跟着renumber
 - 新增 1 处 ⚠️ 存疑：5.1 的「三步」归纳与「collective 要求固定 rank 步调一致所以不能复用 NCCL」是我按 API 形态推的解释，非笔记原意
 - 未决：`mori` 后端的厂商归属在本仓库内没有直接证据（只有 `mori.io` / `mori.cpp` 的 import），故正文只写「依赖外部 mori 包」，未标厂商
+
+## [2026-08-28] normalize | 量化感知训练（QAT）
+- 内容：由半成品草稿（量化定义 + 公式 + 两段实验摘抄 + 运维命令）就地重写为完整文章。修正 S/z 公式的括号缺失（s=(rmax−rmin)/(qmax−qmin)）；补齐量化基础（对称/粒度/per-group、W×A× 记号、"低比特存储 vs 低比特计算"与 W4A16 反量化机理）；补精度补救梯子（RTN→GPTQ/AWQ→QAT，含 fake quant + STE 代码）；两阶段实验按 背景→设置→五臂设计→结果→结论 完整成文（依据：用户 2026-08 在 A100 上的实测 results.json / phase2_results.json / vllm bench 日志，数字全部来自实测原值）；收束为"速度账先行 + 精度梯子"选型方法论。原运维命令收进"附：复现"。按用户要求不写试错过程，torchao 0.16 纯 Python 路径的数值误差以"数字有效范围注记"一句标注（依据：手写 fp32-scale int8 复核 23.85 vs 基线 23.88）。
+- 格式：# 标题 + > 一句话 + 五章分节；公式 LaTeX 化；结果表格化；补双链 [[LLM推理的GPU硬件基础]] [[LLM分布式]] [[投机采样]] 与标签；配图改名为 quant-fp32-int8-symmetric-mapping.png。
+- 级联：index.md 新增"推理优化"分组（本篇 + 投机采样 两条目）。
+- 存疑：无。
+
+## [2026-08-28] assets | 清空 _inbox（11 张截图归位）
+- 读图辨认 → 描述性改名 → 移入主题目录 → 更新引用（tracked 用 git mv，untracked 用 mv）：
+  - 推理优化/：quant-fp32-int8-symmetric-mapping（QAT 笔记）；specdec-suffix-tree-draft-pipeline、specdec-medusa-heads、specdec-eagle1-feat-extrapolator、specdec-eagle1-draft-tree、specdec-eagle3-multilayer-fusion、specdec-mtp-modules、specdec-dflash-arch（投机采样笔记，7 张）
+  - deepseek/：deepseek-v4-hca-shared-kv-mqa、deepseek-v4-csa-lightning-indexer（DeepSeek-V4 笔记）
+  - 学习整理/：deepseek-v4-pro-infratech-full-arch（SGlang中的DeepSeek.py 笔记）
+- 引用更新覆盖 4 篇笔记，grep 复核 wiki/ 下无残留 "Pasted image" 活引用。
