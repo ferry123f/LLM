@@ -1,0 +1,3 @@
+算子生成：2026年6月10日，摩尔线程正式发布并开源MusaCoder 。它是面向GPU底层算子生成的专用代码大模型，包含9B和27B两个参数规模，支持从PyTorch标准算子自动生成高性能CUDA/MUSA原生Kernel代码。在国际通用代码模型评测基准KernelBench中，MusaCoder-27B-RL取得Overall Pass@8 93.2%、Avg.@8 88.60%的成绩。其完整后训练流程均在基于MTT S5000构建的夸娥智算集群上完成 。发布后，模型权重已开源。摩尔线程通过MusaCoder代码大模型等AI工具进行了技术实践。
+VibeServe: Can AI Agents Build Bespoke LLM Serving Systems?
+以前因为人工写代码太贵，我们被迫用“万能但平庸”的通用系统；现在有了 AI 自动写代码，我们可以**低成本地为每一个具体的任务（模型 + 硬件 + 场景）自动生成一个“量身定制、极致高效”的专用系统**，从而打破性能瓶颈。

@@ -276,3 +276,29 @@
   - deepseek/：deepseek-v4-hca-shared-kv-mqa、deepseek-v4-csa-lightning-indexer（DeepSeek-V4 笔记）
   - 学习整理/：deepseek-v4-pro-infratech-full-arch（SGlang中的DeepSeek.py 笔记）
 - 引用更新覆盖 4 篇笔记，grep 复核 wiki/ 下无残留 "Pasted image" 活引用。
+
+## [2026-09-02] normalize | 投机采样（wiki/推理优化/投机采样.md）+ LLM分布式 §八
+- **可回退**：改动前完整备份在 `.backup/2026-09-02-pre-spec/`，含
+  - `wiki/推理优化/投机采样.md`（116 行原文）
+  - `wiki/学习整理/LLM分布式.md`（402 行原文）与单独切出的 `section-八-投机采样.md`
+  - `_inbox-原样/`（23 张改名前的 `Pasted image *.png` 快照）
+  - 回退方式：`cp .backup/2026-09-02-pre-spec/wiki/推理优化/投机采样.md wiki/推理优化/` 即可；
+    `LLM分布式.md` 亦可用 `git show fffab70a33531f2529a33584d8df8a335b14c578:"wiki/学习整理/LLM分布式.md"` 取改前版本。
+- **投机采样.md 116 → 290 行**：原文三个 `#` 一级标题各是一整句话，改成「零/一/二/三/四」五节 + 二级子节；
+  修复被截断的粗体（`α **个 to****ken**`、`γ  **个 token**`）、标题行内嵌图片、混用的列表符号。
+  **用户原有观点一字未删**（安装前逐条 grep 校验 21 个承载论点的短语，全部留存）。
+- 新增（均以引用块或 ⚠️ 标注为「非原文」）：§零 共同骨架与三类分野、bonus token 白送的解释、
+  「为什么在特征空间外推」、EAGLE-3 多层融合的图读、DFlash↔EAGLE 分野、DSpark Confidence Head 是调度用的、
+  DFlash 2 路径选择器的相邻对打分/深度消融读数（5 层+转换器 +3% 参数 ≈ 15 层）、三组 benchmark 转写、§四 选型表。
+- **对原文的更正 2 处**（在 LLM分布式 §8.4，源码核对自 `d:/project/sglang` commit `fdebc938f7` / tag v0.5.16）：
+  ① `NEXTN` 不在 `SpeculativeAlgorithm` 枚举里，只是 `EAGLE` 的别名（`spec_registry.py:162` 的 `_RESERVED_ALIASES`
+     + `arg_groups/speculative_hook.py:52`）；`server_args.py:1717` 的 help 文本仍列着它，help 与枚举不一致。
+  ② `--speculative-accept-threshold-single/-acc`（默认均 1.0）调低会把「分布无损」变成有损档位；
+     `speculative_use_rejection_sampling` 默认 False。
+- **删除 1 句**（LLM分布式 §8.5）：原文「补上 §四 说的『PP 在推理里没有 micro-batch 可切』的短板」——
+  投机采样并不产生可流水的 micro-batch，理由已写在该处引用块里。
+- **配图归位**：`assets/_inbox/` 23 张 → 17 张 `git mv` 进 `assets/推理优化/`，按 `specdec-<方法>-<内容>.png` 命名；
+  6 张经 md5 核对为重复/内容已转写进正文的图 `git rm`（原件仍在上述备份中）。`_inbox` 已清空至仅剩 `.gitkeep`。
+- 校验：全库 129 条 wikilink/图片嵌入 **0 坏链**，图片文件名全局唯一（短链前提），代码围栏配平，无 tab/nbsp。
+- 更新 index.md（投机采样条目重写，Updated → 2026-09-02）。
+- **未处理**：`wiki/推理优化/Vibe coding赋能推理优化.md`（用户新建的 2 行素材，index 中尚无条目），本轮未动。

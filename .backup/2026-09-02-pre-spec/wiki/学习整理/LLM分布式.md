@@ -347,27 +347,12 @@ SGLang 里的落点：
 
 **和分布式的关系**：量化和 TP 是**同一个方向上的两种手段**——都在减少「每张卡每步要搬的权重字节」。两者可以叠加（FP8 权重 + TP=4，每卡搬 1/8），但 TP 要付 All-Reduce 的通信代价，量化要付精度代价。
 
+
 ## 八、投机采样（Speculative Decoding）
 
 decode 是 memory-bound 的——**搬一次权重只产出 1 个 token，算力大量闲置**。投机采样的思路：用一个**便宜的方式先猜若干个 token**，再让大模型**一次性并行验证**这几个。猜对了就白赚，猜错了从错的那个位置截断重来，**结果分布与原模型完全一致**（靠拒绝采样保证）。
 
-这是它和 §七 量化最根本的分野：**量化拿精度换速度，投机采样理论上不换任何东西**，纯粹是把 decode 阶段闲置的算力捡起来用。
-
-### 8.1 一次投机的三步
-
-| 步骤 | 做什么 | 代价 |
-|---|---|---|
-| **draft（猜）** | 用小模型 / 轻量 draft 头 / 字符串匹配，产出 k 个候选 token | 多跑 k 次廉价前向，或几乎为零（N-gram） |
-| **verify（验）** | 把 k 个草稿**拼成一条序列**送进大模型，配一个特制的 attention mask，**一次 forward** 拿到所有位置的 logits | **一次大模型前向——和原本只吐 1 个 token 的那次一样贵** |
-| **accept（收）** | 逐位比对，**从第一个不匹配处截断**，前面的全部保留，后面的连同其 KV 一起丢弃 | 一个小 kernel |
-
-**为什么划算**：verify 那一次 forward 搬的权重字节数，和「只吐 1 个 token」的那次**完全相同**，但产出可能是 1~k+1 个 token。§七 说过 decode 的耗时约等于搬权重的时间——**闲置的算力被 k 个 token 填上了，而带宽开销没变**，吃的正是这条规律的红利。
-
-**k+1 里的「+1」是白送的**：验证最后一个草稿 token 时，大模型在该位置输出的 logits 本身就是**下一个** token 的预测，SGLang 代码里管它叫 **bonus token**（`speculative/eagle_info.py` 的 `bonus_tokens`）。所以**哪怕 k 个草稿全被拒，这一步也至少产出 1 个 token**，不会空转。
-
-> 「不空转」不等于「不会更慢」——**draft 阶段本身要花时间**。接受率太低时，省下的大模型前向次数抵不过 draft 的开销，净收益可以是负的。见 8.3。
-
-### 8.2 四条路线
+四条路线：
 
 | 路线 | 做法 | 特点 |
 |---|---|---|
@@ -378,54 +363,11 @@ decode 是 memory-bound 的——**搬一次权重只产出 1 个 token，算力
 
 > 原笔记里这张表是终端里粘进来的 ASCII 制表符画的，顶边框丢失、MTP 一行的文字被截断，已重排为 markdown 表并补回被截掉的「EAGLE 式 draft 用」。内容按原意保留，未增删观点。
 
-**这四条其实是一条谱系**：从「draft 完全不知道 target 在想什么」（独立小模型）→「根本不用模型、只赌复读」（N-gram）→「draft 能看到 target 的 hidden state」（EAGLE）→「draft 干脆是 target 训练时的一部分」（MTP）。**越往右，draft 与 target 的信息耦合越紧，接受率越高，但对模型/权重的要求也越硬**（MTP 只有原厂放出 MTP 头的模型才能用）。
+**为什么这条也算「分布式」的邻居**：投机采样把 decode 从「每步 1 个 token」变成「每步验证 k 个 token」，**等于人为把 batch 维度撑大**——这正好补上了 §四 说的「PP 在推理里没有 micro-batch 可切」的短板，也是 TP 的 All-Reduce 摊薄的机会（一次同步覆盖 k 个 token 而不是 1 个）。代价是**通信次数不变但每次的量变大**，对带宽更友好、对延迟更宽容。
 
-### 8.3 收益的边界（什么时候不该开）
+> ⚠️ 存疑：上面「投机采样撑大 batch 维度、间接改善并行效率」是我加的串联，**你原笔记只列了四条路线的做法与特点**。方向上应该没问题（verify 阶段确实是一次 forward 过 k 个 token），但「摊薄 All-Reduce」这类量化收益我没有实测依据。
 
-投机采样的加速比大致由两件事决定：**期望接受长度**（接受率 α 与草稿长度 k 共同决定）和 **draft 本身的成本**。由此有三个实践上的边界：
-
-- **k 不是越大越好**。k 变大，draft 成本线性上涨，但接受长度的增长会被 α 的连乘拖住（第 i 个草稿要被接受，前 i−1 个都得先被接受）。所以每个模型/负载都有各自的最优 k。
-- **batch 变大后收益迅速衰减**。投机采样吃的是「算力闲置」这块红利；而 batch 本身就是填算力的手段。**大 batch 下 GPU 已经接近喂饱，此时 draft 反而在和真实请求抢算力**——高并发服务场景开投机采样常常是亏的，低并发/单流（本地、代码补全）才是它的主场。
-- **接受率是数据分布的函数，不是常数**。同一套配置，写代码（大量复读）和开放问答的接受率能差一倍。
-
-> SGLang 把这个权衡直接做成了开关：`--speculative-adaptive` 会**按运行时观测到的接受率动态调 `num_steps`**（`speculative/adaptive_spec_params.py`），配 `--speculative-adaptive-config` 给 JSON 调参。这也反过来印证了「最优 k 随负载漂移」不是理论洁癖。
-
-### 8.4 在 [[SGlang]] 里的对应
-
-**选算法**：`--speculative-algorithm`，`--help` 里列的内置名是 `EAGLE` / `EAGLE3` / `NEXTN` / `STANDALONE` / `NGRAM` / `DFLASH` / `DSPARK`，另外可以用 `SpeculativeAlgorithm.register` 注册树外算法。
-
-> ⚠️ **`NEXTN` 不是一个独立算法**。枚举 `SpeculativeAlgorithm`（`speculative/spec_info.py:30`）的成员其实是 `DFLASH / DSPARK / EAGLE / EAGLE3 / FROZEN_KV_MTP / STANDALONE / NGRAM / NONE`——**没有 `NEXTN`**。它是一个保留别名（`speculative/spec_registry.py:162` 的 `_RESERVED_ALIASES`），解析时 `NEXTN → EAGLE`；只有当 draft 是 Gemma4 assistant 架构时才会被提升成 `FROZEN_KV_MTP`（`arg_groups/speculative_hook.py:52`）。也就是说 **DeepSeek 那种 MTP 头，在 SGLang 里走的就是 EAGLE 这条代码路径**——和 8.2 说的「MTP 思路同 EAGLE」在实现上完全对得上。
-
-**定草稿的形状**（三件套，共同决定那棵树长什么样）：
-
-| 参数 | 含义 |
-|---|---|
-| `--speculative-num-steps` | 草稿往前走几步（树的**深度**） |
-| `--speculative-eagle-topk` | 每步保留几个分支（树的**宽度**）。**取 1 就退化成一条链**，取 >1 才是 EAGLE 的树形草稿 |
-| `--speculative-num-draft-tokens` | 一次 verify 送进去几个 token（树被展平后的**总长**，即 8.1 的 k+1） |
-
-**精确性其实是可调的**——这点值得单独记一笔，因为它和开头「分布与原模型完全一致」是有前提的：
-
-- `--speculative-use-rejection-sampling` **默认是 `False`**，且要求 `topk=1`。默认路径走的是树形验证 kernel（`verify_tree_greedy` / `tree_speculative_sampling_target_only`），不是教科书里那套标准拒绝采样。
-- `--speculative-accept-threshold-single`、`--speculative-accept-threshold-acc` 默认都是 `1.0`（严格）。调低就是**主动放宽接受条件换接受率**——help 里写得很直白：接受概率从 target 概率 `p` 抬到 `min(1, p / threshold_acc)`。
-
-> 结论：**「投机采样不损精度」是算法层面的性质，不是任意配置下的保证。**一旦调低这两个阈值，就是在拿分布一致性换吞吐了，和量化一样属于有损档位。
-
-**N-gram 那条也比表里写的复杂**：SGLang 的实现不是朴素字符串匹配，而是**带容量上限的 trie + BFS 搜索**——`--speculative-ngram-max-trie-depth`、`--speculative-ngram-min-bfs-breadth` / `--speculative-ngram-max-bfs-breadth`、`--speculative-ngram-capacity`，甚至可以挂一份**外部语料**（`--speculative-ngram-external-corpus-path`）来提高命中。
-
-**`DFLASH` / `DSPARK` 是原笔记四条路线之外的两条新路**，代码里归为一族（`is_dflash_family()`），共同点是**按「块」而不是按树来验证**：DFLASH 的验证是**线性非树**的，block size 即验证窗口（`--speculative-dflash-block-size`）；DSPARK 每块提 gamma 个草稿、验证窗口是 gamma+1，还配了一张离线 profile 出来的 SPS 代价表（`--speculative-dspark-sps-table-path`）喂给 ragged-verify 调度器做预算分配。
-
-> ⚠️ 存疑：仓库的 `docs/` 里**完全没有** DFLASH / DSPARK 的说明，上面这段只是我按 `--help` 文本和 `speculative/dflash_*.py`、`speculative/dspark_components/` 的代码结构归纳的，**它们各自对应哪篇论文、draft 是怎么产生的，我没查到依据**。
-
-代码全都在 `python/sglang/srt/speculative/` 下。[[SGlang]] 篇 §五 还讲到 EAGLE 路径下 FlashInfer 会额外开一条 `plan_stream`，把草稿多步的 plan 挪出关键路径（那处标注也还挂着一个存疑）。
-
-### 8.5 为什么这条也算「分布式」的邻居
-
-投机采样把 decode 的一步从「1 个 token 的前向」变成「k+1 个 token 的前向」。对 TP 来说，**每层 All-Reduce 的次数一次都没多，但一次同步覆盖了 k+1 个 token**——§三 说过小包 All-Reduce 是**延迟主导**的，所以**摊到每个 token 头上的同步开销直接降到约 1/(k+1)**。代价是每次同步的字节数变大，负载从延迟敏感挪向带宽敏感，这对 §三 那张表里的慢链路（跨机 IB）反而是好消息。
-
-> ⚠️ 存疑：这段串联是我加的，**你原笔记只列了四条路线的做法与特点**。「All-Reduce 次数不变、一次覆盖 k+1 个 token」是从 TP 的结构直接推出来的，方向应该稳；但**实际能省多少没有实测依据**，而且要和 8.3 的第二条一起看——大 batch 下投机采样本身就不划算，这份通信红利也就无从谈起。
->
-> 另：原稿这里还有一句「这正好补上了 §四 说的『PP 在推理里没有 micro-batch 可切』的短板」，复查后我删掉了——投机采样撑大的是**单步内的 token 数**，并不会给 PP 造出可以流水起来的 micro-batch，两者不是一回事。
+> **[[SGlang]] 里的对应**：`--speculative-algorithm` 内置 `EAGLE` / `EAGLE3` / `NEXTN` / `STANDALONE` / `NGRAM` / `DFLASH` / `DSPARK`（还可以用 `SpeculativeAlgorithm.register` 注册树外算法），配 `--speculative-num-steps`（草稿走几步）、`--speculative-eagle-topk`（每步几个分支）、`--speculative-num-draft-tokens`（一次 verify 几个）。那篇 §五 还讲到 EAGLE 路径下 FlashInfer 会额外开一条 `plan_stream`，把草稿多步的 plan 挪出关键路径。
 
 ## 九、在 SGLang 里的落点
 
@@ -455,7 +397,6 @@ decode 是 memory-bound 的——**搬一次权重只产出 1 个 token，算力
 
 - 本文的并行策略、通信原语、SM/Warp、量化与投机采样各节整理自学习笔记与配图；**图为示意，非某一框架的实际实现**。
 - §八 的投机采样表原为终端 ASCII 制表符绘制，顶边框缺失、MTP 一行被截断，已重排为 markdown 表并补回截断文字，**观点未增删**。
-- **§八 于 2026-09-02 重整**：四路线表原文一字未动，外围补了 8.1 三步流程、8.3 收益边界、8.4 的 SGLang 参数核对（含 `NEXTN` 是别名、accept-threshold 会破坏分布无损这两处**对原文的更正**），并删掉了 8.5 里「补上 PP 没有 micro-batch 可切的短板」一句（理由写在该处引用块里）。**改前原文完整备份在 `.backup/2026-09-02-pre-spec/`**，回退方式见 `wiki/log.md` 同日条目。
-- §五、§八、§九 的 SGLang 参数与文件路径核对自 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）；**参数名可能随版本变化，以 `--help` 为准**。
+- §五、§九 的 SGLang 参数与文件路径核对自 `d:/project/sglang`，commit `fdebc938f7`（tag `v0.5.16`）；**参数名可能随版本变化，以 `--help` 为准**。
 - §1.1 的 ZeRO 三级划分见正文中的 ⚠️ 存疑标注。
 - **§五 由文末两段原始笔记扩写而成**：原文是 NIXL 与 Mooncake TE 各一段的裸文字（贴在 §备注 之后），观点全部保留并接上了 SGLang 的源码落点；原段落已删除，避免同一内容两处并存。
