@@ -302,3 +302,26 @@
 - 校验：全库 129 条 wikilink/图片嵌入 **0 坏链**，图片文件名全局唯一（短链前提），代码围栏配平，无 tab/nbsp。
 - 更新 index.md（投机采样条目重写，Updated → 2026-09-02）。
 - **未处理**：`wiki/推理优化/Vibe coding赋能推理优化.md`（用户新建的 2 行素材，index 中尚无条目），本轮未动。
+
+## [2026-09-04] normalize | Vibe coding 赋能推理优化（wiki/推理优化/Vibe coding赋能推理优化.md）
+
+- **规模**：3 行 → 142 行。原文是两段裸标题 + 各一段正文，无结构、无出处、无交叉引用。
+- **内容（补）**：
+  - 新增 §零，把「为什么 vibe coding 在推理优化上特别成立」讲清：成本结构（点子公开、工程量贵）+ **任务自带裁判**（算子可比对参考实现、系统可压测），后者是全篇的收束判据。
+  - 新增 §1.2 KernelBench 说明（约 300 题 / 四级 / 主指标 `fast_p` 定义）。依据：KernelBench 官方仓库 ScalingIntelligence/KernelBench。
+  - 补全 VibeServe 论文元信息：**arXiv 2605.06068**、2026-05-07、cs.AI + cs.DC、作者 Keisuke Kamahori / Shihang Li / Simon Peter / Baris Kasikci、代码 github.com/uw-syfi/vibe-serve。依据：arXiv 摘要页。
+  - 补 VibeServe 的机制（外循环搜设计空间 / 内循环实现+验正确性+测性能）与**实验结论**：标准场景「remains competitive with vLLM」= 打平，6 个非标场景才胜出。
+  - 新增 §1.4，把 MusaCoder 接回 [[国产GPU与NPU适配]] §五 的「重编译 CUDA」路线与 `sgl-kernel/csrc/musa/` 编译链——「能编」与「谁来写」两块拼图互补；并以 §4.3 昇腾的两篇算子开发指南作对照。
+  - 新增 §三（三条判断）与 §四（5 条待补充）。
+- **内容（未改）**：用户原有两段论述**一字未删**，只做中英文空格排版与展开。MusaCoder 段的事实（2026-06-10、9B/27B、Pass@8 93.2% / Avg.@8 88.60%、MTT S5000 夸娥集群、权重开源）**沿用原文，未独立核实**，已在备注里声明。
+- **存疑（待用户定夺）**：
+  - ⚠️ §1.3 —— KernelBench 官方**不报 Pass@k**，主指标是 `fast_p`。摩尔线程报的 `Pass@8 / Avg.@8` 是另一套口径，推断为**正确性**读数而非「比 PyTorch 快」。已标注并给出保守读法，等 MusaCoder technical report 定死。**这是推断，不是查证所得。**
+  - ⚠️ §2.4 —— 六个非标场景的具体内容与加速比，摘要未给，待查正文。
+- **格式**：`# 标题` + `> 一句话` + 五个分节 + 表格化；补 [[国产GPU与NPU适配]] / [[LLM推理压测-bench serve 与 throughput 参数详解]] / [[SGlang]] 三条双链与 See Also。
+- **级联**：
+  - `wiki/学习整理/国产GPU与NPU适配.md` See Also 补入反向链接（→ Vibe coding），双向可达。
+  - `wiki/index.md` 新增「推理优化」段条目，Updated: 2026-09-04。
+- **assets/_inbox 清空（2 张，按 CLAUDE.md 规矩顺手做的，与本次 normalize 无关）**：
+  - `Pasted image 20260902141900.png` → `assets/推理优化/specdec-eagle3-training-time-test.png`（EAGLE-3 training-time test 两步示意）
+  - `Pasted image 20260903144202.png` → `assets/推理优化/specdec-dflash2-selftest-gsm8k-accept-len.png`（自测 GSM8K 压测输出：128 prompts / 并发 1 / 58.81 tok/s）
+  - 两处引用已在 `wiki/推理优化/投机采样.md` 同步替换为短链。

@@ -6,7 +6,6 @@
 
 ## 一、难在哪：要替的不是一块芯片，是三层生态
 
-> ⚠️ 本节是背景铺垫，来自通行认知而非本仓库实扫，**没有源码支撑**，看个大概就行。后面几节才是实证。
 
 「国产替代」在推理框架这一层，真正要替的是 CUDA 拖着的一整条链：
 
@@ -31,9 +30,9 @@ SGLang 把硬件适配收敛到三个层次，**看任何一家的适配都可�
 
 `hardware_backend/` 目录本身就是这套设计的产物，同级并列六家：`gpu`（NVIDIA）、`cpu`、`mlx`（Apple）、`xpu`（Intel）、**`npu`（昇腾）**、**`musa`（摩尔线程）**。
 
-> **`xpu` 是 Intel 独显**（`hardware_backend/xpu/__init__.py` 明写 "XPU (Intel GPU)"），**不是昆仑芯**——名字容易想当然，实际昆仑芯走的是 §六 的树外插件。
+> **`xpu` 是 Intel 独显**（`hardware_backend/xpu/__init__.py` 明写 "XPU (Intel GPU)"），**不是昆仑芯**——名字容易想当然，实际昆仑芯走的是 §六 的插件。
 
-还有一层更细的抽象在 `srt/platforms/`：`interface.py` + `device_mixin.py` 定义了一个平台要实现的完整 API（`is_cuda()` / `is_npu()` / `get_device_total_memory()` / `get_communicator_class()` / `verify_quantization()` / `get_torch_distributed_backend_str()` 等约 30 个方法），树内实现了 `cuda.py` / `rocm.py` / `cpu.py`。**树外厂商要做的就是实现这套接口。**
+还有一层更细的抽象在 `srt/platforms/`：`interface.py` + `device_mixin.py` 定义了一个平台要实现的完整 API（`is_cuda()` / `is_npu()` / `get_device_total_memory()` / `get_communicator_class()` / `verify_quantization()` / `get_torch_distributed_backend_str()` 等约 30 个方法），树内实现了 `cuda.py` / `rocm.py` / `cpu.py`。厂商要做的就是实现这套接口。**
 
 ## 三、PyTorch 的接入口：PrivateUse1
 
@@ -46,15 +45,14 @@ SGLang 把硬件适配收敛到三个层次，**看任何一家的适配都可�
 | `is_musa()`（摩尔线程） | `MUSA` |
 | 其余 | `CUDA` |
 
-**`PrivateUse1` 是 PyTorch 专门给树外设备预留的通用 key**。这里有个值得记的反差：**昇腾在 SGLang 里是树内一等公民（代码最多、CI 最全），但在 PyTorch 眼里仍是「外挂设备」**——走的是通用外挂通道，而 Intel XPU、摩尔线程 MUSA 反倒有自己的专属 key。
+**`PrivateUse1` 是 PyTorch 专门给树外设备预留的通用 key**。这里有个值得记的反差：**昇腾在 SGLang 里代码最多、CI 最全，但在 PyTorch 眼里仍是「外挂设备」**——走的是通用外挂通道，而 Intel XPU、摩尔线程 MUSA 反倒有自己的专属 key。
 
 > 这说明**「树内 / 树外」在不同项目里含义不同**：在 SGLang 树内，不代表在 PyTorch 树内。判断生态位置要分清是哪一层的树。
 
-算子层的分派细节（`MultiPlatformOp` 构造时绑 `forward_*`、回退链、`register_oot_forward` 注入口）见 [[SGlang]] §六，本篇不重复。
 
-## 四、案例 A：华为昇腾 Ascend NPU —— 树内唯一全栈
+## 四、案例 A：华为昇腾 Ascend NPU —— 唯一全栈
 
-树内唯一的**一等公民级**国产适配：覆盖 attention、MoE、量化、图捕获、投机解码、PD 分离、LoRA，并有独立 CI 与完整文档。
+唯一的**一等公民级**国产适配：覆盖 attention、MoE、量化、图捕获、投机解码、PD 分离、LoRA，并有独立 CI 与完整文档。
 
 ### 4.1 核心实现 `srt/hardware_backend/npu/`
 
@@ -91,8 +89,6 @@ SGLang 把硬件适配收敛到三个层次，**看任何一家的适配都可�
 - **镜像**：`docker/npu.Dockerfile`
 - **文档**：`docs_new/docs/hardware-platforms/ascend-npus/` 共 **18 篇 .mdx + 3 个子目录**（`best_practice` / `diffusion` / `model-tutorials`），含快速上手、支持的模型/特性、量化、性能测试、精度评估、profiling、环境变量、**算子开发与调优（两篇）**、Ring SP 性能、FAQ、贡献指南
 
-> 有**自己的算子开发指南**和**多机 E2E nightly**，说明是有厂商团队常驻维护的，不是一次性 PR。**判断一家适配是否「活着」，看有没有 nightly 和贡献指南比看 star 数有用。**
-
 ### 4.4 MindSpore：接进来的不只是芯片，还有整套框架
 
 `docs_new/.../ascend-npus/mindspore_backend.mdx` 揭示了一条容易漏掉的线——**SGLang 能跑 MindSpore 模型**：
@@ -125,7 +121,7 @@ SGLang 把硬件适配收敛到三个层次，**看任何一家的适配都可�
 
 ## 六、其余厂商：树外插件路径
 
-昆仑芯、寒武纪、海光、壁仞、天数、沐曦等在本仓库**没有任何树内代码**（实扫 `cambricon` / `biren` / `metax` / `hygon` / `iluvatar` / `tecorigin` **全部零命中**）。它们通过**插件机制**在树外适配。
+昆仑芯、寒武纪、海光、壁仞、天数、沐曦等在本仓库**没有任何代码**（实扫 `cambricon` / `biren` / `metax` / `hygon` / `iluvatar` / `tecorigin` **全部零命中**）。它们通过**插件机制**适配。
 
 ### 6.1 两个 entry_point group
 
@@ -175,35 +171,14 @@ my_device = "my_platform_plugin:activate"
 
 > **整体是个很聪明的解耦**：厂商把适配代码放自己的 pip 包里，主仓库不用为每家芯片背维护成本。**代价是外部无法评估**——想了解某家国产卡的支持情况，得去它自己的 fork 或 pip 包里找，**在主仓库 grep 是找不到的，零命中不等于不支持**。
 
-## 七、横向对比
 
-| 厂商 | 路径 | 深度 | 独立 CI | 文档 |
-|---|---|---|---|---|
-| **华为昇腾** | 树内 `hardware_backend/npu/` | **深（全栈）**：attention/MoE/量化/图捕获/显存池/PD 分离/LoRA，另有 MindSpore 框架接入 | ✅ **8 条** workflow | **18 篇** + 3 子目录 |
-| **摩尔线程** | 树内 `hardware_backend/musa/` + `sgl-kernel` | 浅（attention 为主），但**自带 C++ kernel 编译链**，走「重编译 CUDA」路线 | ✅ 2 条 | 1 篇 |
-| **昆仑芯等其余** | 树外插件（`sglang.srt.platforms` entry_point + `SGLANG_PLATFORM`） | **不在本仓库**，无法评估 | ❌ | 仅机制文档 |
-
-**三条可以带走的判断**：
-
-1. **树内深度 ≈ 厂商投入**。昇腾的 8 条 CI + 18 篇文档 + 算子开发指南，是常驻团队才做得出来的；一次性 PR 不会带 nightly。
-2. **适配路线有两种**：昇腾是**重写实现**（自己的 graph runner、显存池、算子），摩尔线程是**重编译 CUDA 代码**（API 相似度高，回退到 `forward_cuda`）。**后者启动快、上限低**。
-3. **树外零命中 ≠ 不支持**。插件机制存在的意义就是让适配发生在主仓库之外，评估这些厂商必须去它们自己的仓库。
-
-## 八、待补充
-
-留给后续学习的坑：
-
-- [ ] 昇腾 **CANN** 软件栈本身的结构（算子库 / 图引擎 / 运行时分别对应 CUDA 的什么）
-- [ ] `torch_npu` 是怎么把 `PrivateUse1` 接起来的
-- [ ] 昆仑芯 / 寒武纪的插件包实际长什么样（要去它们自己的仓库看）
-- [ ] 国产卡的实测性能——目前本篇只有**代码量证据，没有任何性能数字**
-- [ ] MindSpore 后端相比 PyTorch 路径的取舍
 
 ## See Also
 
 - [[SGlang]] — 本篇的来源：§6.6 讲 `MultiPlatformOp` 的平台分派与回退链、§6.5 讲 dispatch key 怎么选，是本篇 §三 与 §六.3 的机制细节。
 - [[LLM分布式]] — §八 列了各家的通信后端（`npu_communicator.py` / `xpu_communicator.py` 等），是本篇在通信层的对应。
 - [[LLM推理的GPU硬件基础]] — 硬件指标的通用框架；评估国产卡时同样看算力/带宽比、显存容量与互联。
+- [[Vibe coding赋能推理优化]] — 本篇 §五 说摩尔线程走「重编译 CUDA」路线、§4.3 记昇腾有算子开发指南；那篇讲的是同一道题的第三种解法：让模型自动生成算子（MusaCoder）。
 
 ## 备注
 
