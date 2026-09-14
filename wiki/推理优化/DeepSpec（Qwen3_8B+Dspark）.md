@@ -1,6 +1,6 @@
-# DeepSpec 训练 DSpark draft 头：Qwen3-8B 全流程
+# [DeepSpec](https://github.com/deepseek-ai/DeepSpec) 训练 DSpark draft 头：Qwen3-8B 全流程
 
-> 用 DeepSpec 框架给 Qwen3-8B 训一个 **DSpark** draft 头的完整跑通记录（smoke 规模，1053 条样本 / 2 epoch），从装环境一路到验证接受长度。DSpark 本身的原理见 [[投机采样]] §2.7。
+> 用 DeepSpec 框架给 Qwen3-8B 训一个 **DSpark** draft 头的完整跑通记录（1053 条样本 / 2 epoch），从装环境一路到验证接受长度。DSpark 本身的原理见 [[投机采样]] §2.7。
 
 > [!note] 流水线一览
 > 数据切分 → 用 target 自己生成答案（蒸馏语料）→ 预抽 target 的 hidden state 存成 cache → 拿 cache 训 draft 头 → 评接受长度。
@@ -104,7 +104,7 @@ CUDA_VISIBLE_DEVICES=1 python3 eval.py \
 >
 > ⚠️ accept_len ≈ 1 意味着**草稿基本全被拒**，等于没有加速——对 1053 条样本、2 epoch 的 smoke 跑这是预期结果，只能证明流程通了，不能用来评价 DSpark 本身。对照 [[投机采样]] §2.9 里正式 checkpoint 在 Qwen3.8-27B 上的 accept_len 4.7 左右。
 
-## 7.SpecForge（Qwen3_8B+Dflash2）
+## 7.[SpecForge](https://github.com/sgl-project/SpecForge)（Qwen3_8B+Dflash2）
 7.1安装
 NVIDIA CUDA、AMD ROCm、Ascend NPU
 7.2数据准备
