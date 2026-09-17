@@ -411,3 +411,23 @@
 - **留了 3 条待办**把结论钉死：① MTP 扫到 topk > 1 的甜点；② DSpark block-size 7 → 8 与论文对齐重测；
   ③ 查清 Qwen3.8-27B「默认采样」的具体取值后同档复跑——否则 −0.79 / −1.20 是采样差异还是实现差异**无法定论**。
 - 投机采样 446 → 486 行；index.md 投机采样条目补入 §2.9.4 对照结论。
+
+## [2026-09-15] ingest | sglang 中的 DSpark：源码走读
+- Source: sglang 源码 `fdebc938f7`（release/v0.5.16），`python/sglang/srt/speculative/dspark_components/` 及 `models/dspark.py`、`models/deepseek_v4_dspark.py`
+- New article: 全新概念（DSpark 的 SGLang 实现层走读），与「投机采样 §2.7（算法/论文层）」「DeepSpec（训练层）」互补、不重复
+- Updated: （新建，无级联更新）
+- 补登 index.md 推理优化分组
+
+## [2026-09-16] normalize | DeepSpec（Qwen3_8B+Dspark）§7 SpecForge（仅排版）
+
+- 用户要求：「整理一下 deepspec 的第 7 节，不用添加什么东西，就是格式上的处理」——**纯排版**，不补内容、不加解读。
+- 回退点：`.backup/2026-09-16-pre-spec7/`（§7 加入后、整理前的 158 行原件）。
+- **改的四处，全是结构**：
+  - `7.1安装` / `7.2数据准备` / `7.3获取中间层隐特征` / `7.4训练` 原本是**正文裸行**（非标题，大纲里不出现），提为 `### 7.x`，编号与文字照抄；`## 7.` 后补空格与其余小节对齐。
+  - 命令原本靠 **Tab 缩进**表达层级（Obsidian 下渲染不稳、复制易带 Tab），统一改为 ```bash 代码块；全文已无 Tab 缩进行。
+  - `Dataset Presets：` / `Regenerate Datasets：` / `离线：` / `在线：` 四个标签加粗，替代原先的缩进层级。
+  - Dataset Presets 那两条原文写成 `# ultrachat python scripts/prepare_data.py ...`，**注释与命令同行**——套进代码块后整行都会被 `#` 注掉，故拆成「注释行 + 命令行」两行，**token 未动**。
+- **⚠️ 顺手修的一个渲染 bug**：`` `regenerate_train_data.py‘ `` 用反引号开、**弯引号 `‘`（U+2018）收尾**，属未配对反引号，会把后文的代码格式一路吃掉。已改为正常反引号。这是格式缺陷不是措辞改动，故未另行征询。
+- **未动**：7.3「在线」那段关于 Mooncake / `SampleRef` / `RefDistributor` 的论述**一字未改**（含其中的全角/半角与空格），7.1 的三行硬件列表、7.4 的 specforge 命令同。
+- **留存校验**：把 §7 整段做归一化（去空白、去 ```、去 `#`、去 `**`、弯引号折算为反引号）后比对——**1612 字符逐字符相同**，可证只动结构未动文字；代码围栏 26 个配平，标题无跳级，全库图片引用 0 断链。
+- index.md 未改（该条目摘要写的是 1–6 步主流程，§7 是同篇内的补充小节，摘要仍然准确）。

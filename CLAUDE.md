@@ -7,6 +7,7 @@ AI 知识管理员的工作手册。把这个文件放在你的 Obsidian vault �
 - **raw/** — 原始素材，**不可变**。AI 只读，永不修改。按主题分子目录，允许多级嵌套。PDF/视频/xlsx/图片保持原文件名。
 - **wiki/** — AI 维护的消化笔记。允许多级子目录。每篇文章 md 格式，命名自由（描述性即可）。
 - **assets/** — 配图资源，**按 wiki 主题分子目录**（`assets/deepseek/`、`assets/学习整理/` …，与 `wiki/` 的顶层主题一一对应）。详见下节。
+- **_export/** — 对外分享的导出产物（单文件 HTML/PDF），由[触发 7](#触发-7share对外分享笔记) 生成。**不进 git**（已 gitignore），可随时整个删掉重导。
 
 ## assets 规矩
 
@@ -102,6 +103,20 @@ AI 知识管理员的工作手册。把这个文件放在你的 Obsidian vault �
 **动作：** 调用 skill [`weekly-report`](.claude/skills/weekly-report/SKILL.md)。跑同一个 `collect_diff.sh` 的 **`--days 7 --digest`** 汇总模式（按文件净新增行数 + 按天活跃度 + 新增章节标题，不倾泻正文），再写成 6–10 句的中文周报，**同样只在对话里输出，不写任何文件**。
 
 **周报 ≠ 七份日报拼起来**：日报答「今天干了啥」，周报答「这周推进到哪了」——先认主线（净增行数最多且**跨多天**出现的那篇），再归支线，粒度到模块而非函数。没有主线就如实说这周比较散，**别硬编故事**。反臆造底线同日报，且更严：别把「写了很多字」当成「学得很深」。详见 skill 文件。
+
+### 触发 7：Share（对外分享笔记）
+
+**触发词：** "分享这篇笔记"、"把 xxx 发给别人"、"导出 xxx"、"发出去别人看不见图"。
+
+**动作：** 调用 skill [`share-note`](.claude/skills/share-note/SKILL.md)。跑它自带的 [`scripts/export_note.py`](.claude/skills/share-note/scripts/export_note.py)，把指定笔记导出成**单文件 HTML + PDF**（图片 base64 内嵌，脱离 vault 照样能看），产物一律落 `_export/`。笔记名给片段即可，脚本自己在 `wiki/` 下找。
+
+**根因**：图里用的是 Obsidian 短链 `![[x.png]]`，属 vault 内部语法，文件一离开 vault 就没人解析得了——直接发 md 必然丢图，只能导出成自包含格式。
+
+**默认摘掉仓库内务小节**：`## See Also` 和 `## 备注` 不进导出件 —— 前者指向对方根本拿不到的笔记，后者记的是本库的加工历史，单独发出去只会干扰阅读。要保留就加 `--keep-internal`。
+
+**顺带体检源笔记**：落单的反引号、多余或未收尾的代码围栏（Obsidian 宽松、标准 Markdown 不认，症状是**后半篇错位**）会被报出行号。**只报告不改**，问过用户再动手 —— 那是[触发 4](#触发-4normalize笔记加工) 的活。
+
+**只读**：不改源笔记、不动 index.md 与 log.md、不动 raw 与 assets。`_export/` 已 gitignore，导出不污染仓库。HTML 给同事用浏览器看，PDF 给微信/邮件。详见 skill 文件。
 
 ## 约定
 

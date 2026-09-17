@@ -104,63 +104,37 @@ CUDA_VISIBLE_DEVICES=1 python3 eval.py \
 >
 > ⚠️ accept_len ≈ 1 意味着**草稿基本全被拒**，等于没有加速——对 1053 条样本、2 epoch 的 smoke 跑这是预期结果，只能证明流程通了，不能用来评价 DSpark 本身。对照 [[投机采样]] §2.9 里正式 checkpoint 在 Qwen3.8-27B 上的 accept_len 4.7 左右。
 
-## 7. [SpecForge](https://github.com/sgl-project/SpecForge)（Qwen3_8B+Dflash2）
-
-### 7.1 安装
-
+## 7.[SpecForge](https://github.com/sgl-project/SpecForge)（Qwen3_8B+Dflash2）
+7.1安装
 NVIDIA CUDA、AMD ROCm、Ascend NPU
-
-### 7.2 数据准备
-
-**Dataset Presets：**
-
-```bash
-# ultrachat
-python scripts/prepare_data.py --dataset ultrachat
-# sharegpt
-python scripts/prepare_data.py --dataset sharegpt
-```
-
-本地数据：
-
-```bash
-python scripts/prepare_data.py \
-    --dataset sharegpt \
-    --data-path ./raw_sharegpt.jsonl \
-    --output-path ./cache/dataset
-```
-
-**Regenerate Datasets：**
-
-启动sglang服务：
-
-```bash
-python3 -m sglang.launch_server \
-    --model-path meta-llama/Llama-3.1-8B-Instruct \
-    --cuda-graph-max-bs 128 \
-    --dtype bfloat16 \
-    --mem-fraction-static 0.8 \
-    --port 30000
-```
-
-使用脚本重新生成数据集`regenerate_train_data.py`:
-
-```bash
-python scripts/regenerate_train_data.py \
-    --model meta-llama/Llama-3.1-8B-Instruct \
-    --concurrency 128 \
-    --max-tokens 98304 \
-    --server-address localhost:30000 \
-    --temperature 0.8 \
-    --input-file-path ./cache/dataset/sharegpt_train.jsonl \
-    --output-file-path ./cache/dataset/sharegpt_train_regen.jsonl
-```
-
-### 7.3 获取中间层隐特征
-
-**离线：**
-
-```bash
+7.2数据准备
+Dataset Presets：
+	# ultrachat python scripts/prepare_data.py --dataset ultrachat
+	# sharegpt python scripts/prepare_data.py --dataset sharegpt
+	本地数据：
+		python scripts/prepare_data.py \
+	    --dataset sharegpt \
+	    --data-path ./raw_sharegpt.jsonl \
+	    --output-path ./cache/dataset
+Regenerate Datasets：
+	启动sglang服务：
+		python3 -m sglang.launch_server \
+	    --model-path meta-llama/Llama-3.1-8B-Instruct \
+	    --cuda-graph-max-bs 128 \
+	    --dtype bfloat16 \
+	    --mem-fraction-static 0.8 \
+	    --port 30000
+	使用脚本重新生成数据集`regenerate_train_data.py‘:
+		python scripts/regenerate_train_data.py \
+	    --model meta-llama/Llama-3.1-8B-Instruct \
+	    --concurrency 128 \
+	    --max-tokens 98304 \
+	    --server-address localhost:30000 \
+	    --temperature 0.8 \
+	    --input-file-path ./cache/dataset/sharegpt_train.jsonl \
+	    --output-file-path ./cache/dataset/sharegpt_train_regen.jsonl
+7.3获取中间层隐特征
+离线：
 torchrun --nproc_per_node=8 \
     scripts/prepare_hidden_states.py \
     --strategy eagle3 \
@@ -171,17 +145,10 @@ torchrun --nproc_per_node=8 \
     --chat-template llama3 \
     --is-preformatted \
     --max-length 2048
-```
-
-**在线：**
-
+在线：
 让目标模型以 patched SGLang 服务的形式在线运行，负责前向并捕获 hidden states，写入 Mooncake 共享存储。训练侧不直接拿大张量，而是只收到 `SampleRef` 引用（ key、shape、dtype 等），再由 `RefDistributor` （引用分发器，是生产者和消费者之间的调度组件）分发到各 trainer rank，训练时凭引用通过 RDMA 去 Mooncake 取特征。生产者和消费者是两个独立进程池，可以分别扩缩容，并通过窗口同步和背压控制保证训练步一致、缓存不堆积。它不提前落全量 target cache，适合边生成边训练、和 SGLang serving 联动的场景，但系统复杂度比离线模式高。
-
-### 7.4 训练
-
-```bash
+7.4训练
 specforge train --config examples/configs/online/disaggregated/external/qwen3-8b-eagle3-disaggregated.yaml
-```
 ## See Also
 
 - [[投机采样]] —— DSpark / DFlash / MTP 的原理与实测对比
@@ -189,4 +156,3 @@ specforge train --config examples/configs/online/disaggregated/external/qwen3-8b
 
 ## 备注
 - 2026-09-10 规范化：仅做排版——补标题、命令套 bash 代码块、步骤标题由 H1 降为 H2、图片引用改为描述性文件名并取消缩进
-- 2026-09-16 规范化：§7 SpecForge 仅做排版——7.1~7.4 由正文裸行提为 H3、Tab 缩进的命令改为 bash 代码块、`Dataset Presets` 等标签加粗；另修一处未配对的反引号（`regenerate_train_data.py` 原以弯引号 ‘ 收尾，会吃掉后文代码格式）。正文一字未增未删（归一化后与原文逐字符相同）。
