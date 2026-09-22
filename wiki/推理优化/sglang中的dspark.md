@@ -356,6 +356,16 @@ SPS 表是离线 profile 出来的；如果没 profile，`build_uninitialized_sp
 ---
 
 ## 六、变长 verify 与 accept 语义
+| 文件                                | 职责                                                      |
+| --------------------------------- | ------------------------------------------------------- |
+| `dspark_planner.py`               | `schedule_layout`：verify_lens → RaggedVerifyLayout      |
+| `ragged_verify.py`                | `RaggedVerifyLayout`：变长窗口的元数据（indptr 等）                 |
+| `kernels/dspark_verify_window.py` | `BuildRaggedVerifyWindow`：把变长 token 打包成紧凑窗口             |
+| `dspark_verify.py`                | `TargetVerifyExecutor`：跑 target 前向 + accept + finalize  |
+| `dflash_utils.py`                 | `compute_dflash_correct_drafts_and_bonus`：accept 规则（右移） |
+| `kernels/dspark_accept.py`        | accept/finalize/cap 的 torch + Triton 实现                 |
+|                                   |                                                         |
+|                                   |                                                         |
 
 ### 6.1 为什么"变长"
 
@@ -453,7 +463,12 @@ block_accept_lens = commit_lens + cap_trim_lens = correct_len + 1
 ---
 
 ## 七、KV 注入
-
+| 文件                                      | 职责                                             |
+| --------------------------------------- | ---------------------------------------------- |
+| `dspark_components/dspark_kv_inject.py` | `TargetHiddenKvInjector`：分叉两条路径的总开关            |
+| `models/dspark.py`                      | 标准注意力路径的 `write_target_hidden_kv`              |
+| `models/deepseek_v4_dspark.py`          | MLA 路径的 `write_target_hidden_kv`               |
+| `mem_cache/deepseek_v4_memory_pool.py`  | MLA 融合 kernel `fused_k_norm_rope_flashmla` 的入口 |
 ### 7.1 为什么需要 KV 注入
 
 下一个 step 的 draft 前向，需要"前缀 + 上一个 draft 块"的 KV。draft 自己重算前缀的 KV 就浪费了（前缀在 target 里已经算过）。所以把 **target verify 阶段的 hidden states 投影成 draft 的 KV**，直接写进 draft 的 KV pool——省掉 draft 重算前缀。
@@ -518,6 +533,12 @@ KV 注入只碰 norm + KV 投影 + RoPE + 写 cache，**不碰 FFN**，所以这
 
 ## 八、CUDA graph 折叠
 
+| 文件                                      | 职责                                           |
+| --------------------------------------- | -------------------------------------------- |
+| `dspark_components/dspark_draft.py`     | ① draft 采样折叠（`DsparkDraftSampler`）           |
+| `dspark_components/dspark_verify.py`    | ② verify epilogue 折叠（`DsparkVerifyEpilogue`） |
+| `dspark_components/dspark_worker_v2.py` | 折叠条件的层层判定                                    |
+| `dspark_components/dspark_planner.py`   | ③ 变长验证的分桶录图                                  |
 ### 8.1 为什么需要折叠
 
 DSpark 每步跑 **draft 前向 + target 前向 + accept + KV 注入** 四段。如果不折叠，每段都是"Python 发指令 → GPU 执行 → 结果回 Python"，中间有大量 **Python 往返 + 每次 kernel launch 的开销**。
