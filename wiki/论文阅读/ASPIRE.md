@@ -1,6 +1,3 @@
----
-tags: [论文阅读, LLM推理, 投机解码, 长上下文, ASPIRE]
----
 
 # ASPIRE: Asynchronous Batched Self-Speculative Decoding for Long-Context LLM Inference
 
@@ -509,7 +506,7 @@ Z^src_{i,t,h}(u)   ℓr 层对上下文位置 u 的注意力 logit
 
 验证行**本来就要做全注意力**，所以 ℓr 层在验证时抓 logits 是免费的。但验证有 d_i+1 个 query token，全抓太重，所以**只抓第一和最后一个验证 token 的注意力，取平均**，用平均值选页。
 
-### 6.6 为什么这样能对抗陈旧
+### 6.6 为什么这样能对抗陈旧的注意力
 
 S_i 不是"验证时才更新一次"，而是**每个起草步都由 ℓr 重新选一遍**：
 
@@ -642,3 +639,107 @@ S_i 永远跟着当前 token 走。附录 C（图 3）证明：有刷新层时�
   → 问题3：稀疏上下文陈旧 → §4.3 刷新层（ℓr 全注意力每步重选 70 页）
   → 结果：1.70–4.58× 吞吐
 ```
+
+---
+
+## 13. 与 DSpark（SGLang）的对比
+
+> 两个都解决"batch 自回归/投机解码的异构调度"，但走的是**两条正交的技术路线**。DSpark 源码走读见 [[sglang中的dspark]]。
+
+### 13.1 一句话定位
+
+|         | ASPIRE                                            | DSpark                                  |
+| ------- | ------------------------------------------------- | --------------------------------------- |
+| 解决的核心问题 | **长上下文** decode 的 attention 内存墙                   | **batch decode** 的投机调度效率                |
+| 投机技术    | self-speculative：稀疏 attention 起草 + 全 attention 验证 | block-level（EAGLE/MTP 族）：dense block 起草 |
+| 形态      | 研究代码（gpt-fast 风格）                                 | SGLang 生产组件                             |
+
+### 13.2 最根本区别：草稿怎么产生
+
+- **ASPIRE 是 self-speculative**，起草和验证用**同一个 target 模型**，差别只在"读多少 KV"：
+  - draft：同一模型 + 稀疏 attention（读选出的 KV 子集 `S_i`，默认 ρ=7%），一次只前进 1 个 token。
+  - verify：全 attention 读完整 KV，并行解码 `d_i + 1` 个 token。
+  - 不需要额外草稿模型/头，加速来源是"省掉重复读满 KV"。
+
+- **DSpark 是 block-level speculative**，草稿来自专门 draft 结构：
+  - 从 target hidden 抽特征，用 **markov head + confidence head**（或 DeepSeek-V4 的 MoE draft）一次生成 `gamma` 个 token 的 block。
+  - draft 是 **dense** 的，GPU block attention，全程不涉及稀疏 KV 选择。
+
+> 所以 DSpark 属 EAGLE/MTP 线（靠额外 draft 头提质量），ASPIRE 属 MagicDec/SpecAttn 线（靠稀疏 attention 省 KV 读取）。**两条完全不同的投机技术路线。**
+
+### 13.3 "ragged" vs "去同步化"：异构性处理方式相反
+
+两者最像、也最易混淆——都在解决"不同请求最优草稿深度不同"，但手段相反：
+
+- **ASPIRE：把"draft vs verify"这个状态本身去同步化（§4.1 混合前向）**
+  - 同一 forward 里，batch 中一部分请求在 draft、另一部分在 verify，各处于不同 spec 状态。
+  - 每请求独立维护 `d_i`（当前草稿长度）和稀疏上下文 `S_i`，各自决定何时 verify。
+  - 打破"全 batch 一起 draft、一起 verify"的全局 phase barrier。
+
+- **DSpark：保留两阶段（全 batch draft → 全 batch verify），但把 verify 长度做 ragged（参差）**
+  - `_forward_decode` 里仍先 `propose`（整批一起 draft block）再 verify（整批一起验证）。
+  - 区别在 verify 阶段每请求 `verify_len` 不同（`RaggedVerifyLayout`），预算按置信度 top-k 分配。
+
+> **一句话**：ASPIRE 让"谁来 draft、谁来 verify"不同步；DSpark 让"每个请求 verify 多长"不同步。DSpark 的 draft 阶段仍是 batch 级同步的。
+
+### 13.4 成本模型：都离线 profile，但建模对象不同
+
+| | ASPIRE | DSpark |
+|---|---|---|
+| 形式 | 白盒线性模型 | 黑盒吞吐曲线 |
+| 公式 | `τ = β_model + β_mlp·n + β_attn·Σkv` | `batch_tokens → steps_per_sec`（1D 查表 / 2D additive） |
+| 是否拆 MLP/attention | ✅ 显式拆（compute-bound vs memory-bound） | ❌ 不拆，整批一个吞吐 |
+| 决策粒度 | per-request（算 `c_i`，得 `γ_i`） | batch 级（算总 budget） |
+| 目标函数 | `γ_i = argmax (1-α^{γ+1})/(1-α) / (1+c_i·γ)` | `budget = argmax τ(k)·sps(k)` |
+
+### 13.5 ASPIRE 独有、DSpark 完全没有的概念
+
+1. **Refresh layer（起草内上下文刷新）**：因稀疏草稿上下文 `S_i` 会随起草变长而陈旧，故在固定层（N−2）做 full attention 重选稀疏页。DSpark 是 dense draft，无稀疏上下文，**不存在 stale 问题，也无 refresh 概念**。
+2. **接受率在线估计 `α_i`（指数平滑）**：每请求维护平滑标量 `α_i`。DSpark 用 confidence head 直接输出**逐位置生存概率**（cumprod），信息更丰富，但需专门训练的 confidence head。
+
+### 13.6 相同点
+
+1. **都无损**：拒绝采样/一致接受保证，与接受率、草稿质量无关。
+2. **都承认"固定草稿长度次优"**：ASPIRE 图 1 是动机（per-request 接受长度 2.56~20.00）；DSpark 整个 ragged verify + SPS 调度基于同一动机。
+3. **都需离线 profile/calibration**，且都强调"针对同一 task/GPU/batch 配置重新校准"。
+4. **都有退化对照**：ASPIRE 有 `aspire-fixed` / `aspire-fsm`；DSpark 有 `RAGGED_VERIFY_MODE=static` 和未初始化 SPS 表退化为 verify-all。
+
+---
+
+## 14. 对 DSpark 的成本模型启发（后续优化点）
+
+> 只聚焦**成本模型**这一个点。ASPIRE 最有价值的启发不是招牌的"混合前向"，而是它的**白盒成本模型**——尤其是对 attention/KV 那一项的显式建模。混合前向（去同步 draft/verify）和刷新层是 self-speculation 独有的，DSpark 的 block-draft 架构搬不动。
+
+### 14.1 问题：DSpark 的 SPS 表缺失 KV 长度维度
+
+DSpark 的 SPS 表查表键只有一个 `batch_tokens`（= 这一步 verify 的 token 数），`lookup(batch_tokens)` 只吃这一个数：
+
+- 1D 表：`lookup` 按 `batch_tokens` 二分 clamp。
+- 2D additive 表：`step_time = bias + alpha(bs) + theta(M)`，`M = num_reqs + budget`，同样没有 KV 长度。
+
+而 profiler 测表时把 prefix 固定死了：`DEFAULT_INPUT_LEN = 16`，注释明说 "the table is conditioned on the decode-heavy regime"。
+
+**问题在哪**：decode 的 step time 在长上下文下由 full-attention 读完整 KV 主导，而 DSpark 的 verify 恰恰是 full attention。SPS 表是在"KV 长度固定（≈短 prefix）"下测的，一旦 batch 里 prefix 长或异构，`steps_per_sec` 被系统性高估 → 预算决策失真。而 `compute_verify_token_budget` 从头到尾只看 `num_requests` 和 `batch_tokens`，完全没有 prefix/KV 信息。
+
+### 14.2 ASPIRE 的启发：显式拆出 attention/KV 项
+
+ASPIRE 的成本模型显式拆了这项：
+
+```
+τ_t = β_model + β_mlp·n_t + β_attn·( Σ_{j∈D_t}|S_j| + Σ_{j∈V_t} ℓ_j )
+```
+
+其中 `β_attn · Σℓ_j` 就是"attention 随读入的 KV 总长度线性增长"这一物理规律——`β_mlp` 对 compute-bound 的 MLP（∝ token 数）、`β_attn` 对 memory-bound 的 attention（∝ KV 长度）。
+
+### 14.3 迁移方向
+
+1. **给 additive 表补 KV 项**：DSpark 的 `SpsAdditiveCostTable` 已经是 additive 形态（bias/alpha/theta），加一项 `γ(Σkv_len)` 很自然：
+   ```
+   step_time = bias + alpha(bs) + theta(M) + gamma(Σkv_len)
+   ```
+2. **或把查表键扩成二维** `(batch_tokens, total_kv_len)`，让 profiler 支持长 prefix sweep，而不是钉死 16 token。
+3. **用线性拟合生成/平滑 SPS 表**：保留 SPS 表快速查询，但用 ASPIRE 式线性模型生成表值、或作采样点之外的外推 fallback，让表对"没 profile 过的 batch 组合"更鲁棒。
+
+### 14.4 一句话
+
+> ASPIRE 证明了"成本模型不应拍平成 batch_tokens→sps 的黑盒，而应显式拆出 attention/KV 这一项"。DSpark 的 SPS 表当前最大短板就是缺失 KV 长度维度（长上下文下失真），而 `SpsAdditiveCostTable` 已走在 additive 白盒化的路上，补上 `β_attn·Σkv_len` 这一项就齐了。

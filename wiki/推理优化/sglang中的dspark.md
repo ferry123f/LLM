@@ -38,18 +38,6 @@
 6. **落地 + 写 KV**：`commit_lens = correct_len + 1` 个 token 落地；target 的 hidden 投影成 KV 写进 cache（标准注意力通用 / MLA 专用两条路）。
 7. **循环**：bonus 变下一拍的锚点，回到第 1 步。
 
-### 我问过的关键问题（Q&A）
-
-| # | 问题 | 答案（一句话） |
-|---|---|---|
-| 1 | 为什么叫"半自回归"？ | 普通 draft 是 γ 次串行 forward；DSpark 把贵的**主干并行**（1 次 forward），把便宜的依赖（低秩 Markov）留**串行**。 |
-| 2 | 预算公式里的 `num_requests` 是啥？ | 是**批大小 bs**，不是 1——每个请求至少落地 1 个 bonus（保底），所以 `τ(k) = bs + 累加收益`。 |
-| 3 | `correct_len / bonus / cap_trim_lens` 怎么算？ | `correct_len`=连续匹配数（cumprod 一断全断）；`bonus`=第一个不匹配处 target 的预测；`cap_trim_lens`=被"验证上限"截掉的、本来会接受的 draft。 |
-| 4 | `cap_trim_lens` 的恒等式？ | `block_accept_lens = commit_lens + cap_trim_lens = correct_len + 1`，用来恢复"满血接受长度"。 |
-| 5 | STS 校准的是啥？ | 校准的是 **survival（连乘尾概率）**，不是单个 confidence——因为 budget 用的是 survival，连乘误差会放大，得直接对准它。 |
-| 6 | SPS 表没 profile 会怎样？ | 退化成 `[1]→[1.0]`（SPS 恒 1），`θ(k)=τ(k)` 单调 → budget 永远最大 → **verify-all（保守退化）**。 |
-| 7 | KV 注入两条路径？ | **标准注意力**（通用算子，好迁）vs **MLA**（DeepSeek V4 专属，`fused_k_norm_rope_flashmla` 手写 CUDA）。 |
-| 8 | graph 折叠省什么？ | 把 accept/commit/KV 注入塞进 verify 的 CUDA graph，一次 replay 跑完，省掉 Python 往返 + 多次 kernel launch。 |
 
 ---
 
@@ -770,20 +758,7 @@ hidden ──┬──► ③ Markov 采样 ──► draft_tokens ──► ⑦
 | FP8     | 有（AMD 格式）            | 有（自家格式）             |
 | 迁移性质    | 翻译为主                 | 重写为主                |
 
-### 10.4 工作量粗估（无卡，量级参考）
 
-| 阶段 | 海光 | 昆仑芯 |
-|---|---|---|
-| 改校验 + dense/eager 正确性 | 1–2 周 | 2–4 周 |
-| Triton 算子性能 | ~1 周 | 2–4 周（FlagGems 重写） |
-| CUDA graph | 2–4 周（hipGraph） | 无解 → 接受 eager |
-| MLA（若攻） | 1–2 月 | 2–3 月 |
-
-### 10.5 结论
-
-1. 唯一"正确性硬墙"是 MLA（第 6 类），**可绕开**——用标准注意力模型，核心收益不少。
-2. 昆仑芯的难点是 CUDA graph（第 5 类），无等价物，只能 eager。
-3. **建议顺序**：改校验 → 标准注意力 + eager 正确性 →（海光 hipGraph）→ MLA 绕开。
 
 
 
