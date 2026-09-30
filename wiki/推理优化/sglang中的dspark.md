@@ -694,20 +694,18 @@ hidden ──┬──► ③ Markov 采样 ──► draft_tokens ──► ⑦
 
 ## 十、国芯迁移思考
 
-> 目标：把 DSpark 迁到国产卡（昆仑芯 XPU + 海光 DCU）。当前无卡，先做"摸清实现"的准备。工作量为无卡状态下的量级粗估。
 
-**结论先行**：DSpark 的 CUDA 依赖**分层可降级**——第 1~4 类是"翻译题"、第 5 类"移植题"、第 6 类"重写题"，而且第 6 类（MLA）**可以绕开**。**标准注意力模型 + eager 是最小可行迁移目标**（非 MLA，dense 或 MoE 皆可）。
 
 ### 10.1 依赖分层（按迁移难度递进）
 
-| # | 类别 | 组件 | 依赖什么 | 海光 | 昆仑芯 |
-|---|---|---|---|---|---|
-| 1 | 设备校验 | 硬性启动校验 + 静默降级 | `startswith("cuda")` / `is_cuda()` | 必改 | 必改 |
-| 2 | 纯 PyTorch | Markov head、confidence head | 无 | ✅ 直接用 | ✅ 直接用 |
-| 3 | 纯 CPU | 预算规划、SPS/STS 表 | 无 | ✅ 直接用 | ✅ 直接用 |
-| 4 | Triton 算子 | accept / schedule / verify-window | Triton（有 torch 兜底） | ⚠️ 中 | ⚠️ 中 |
-| 5 | CUDA graph 折叠 | draft 采样、verify epilogue、ragged 桶 | CUDA graph | ⚠️ 中(hipGraph) | ❌ 难(无等价) |
-| 6 | 手写 CUDA | MLA KV 注入、jit_kernel、DeepGEMM、FlashMLA | NVIDIA 专属 | ❌ 难 | ❌ 难 |
+| #   | 类别            | 组件                                     | 依赖什么                               | 海光             | 昆仑芯      |
+| --- | ------------- | -------------------------------------- | ---------------------------------- | -------------- | -------- |
+| 1   | 设备校验          | 硬性启动校验 + 静默降级                          | `startswith("cuda")` / `is_cuda()` | 必改             | 必改       |
+| 2   | 纯 PyTorch     | Markov head、confidence head            | 无                                  | ✅ 直接用          | ✅ 直接用    |
+| 3   | 纯 CPU         | 预算规划、SPS/STS 表                         | 无                                  | ✅ 直接用          | ✅ 直接用    |
+| 4   | Triton 算子     | accept / schedule / verify-window      | Triton（有 torch 兜底）                 | ⚠️ 中           | ⚠️ 中     |
+| 5   | CUDA graph 折叠 | draft 采样、verify epilogue、ragged 桶      | CUDA graph                         | ⚠️ 中(hipGraph) | ❌ 难(无等价) |
+
 
 **两处设备校验**：
 
@@ -742,10 +740,7 @@ hidden ──┬──► ③ Markov 采样 ──► draft_tokens ──► ⑦
 - 海光：**hipGraph 移植**（token-keyed 桶 `decode_cuda_graph_runner.py:481` + 两个 epilogue 折叠）。
 - 昆仑芯：无 CUDA graph 等价 → **只能 eager**（这是昆仑芯的性能天花板）。
 
-**阶段 5：MLA （Deepseek模型）
 
-- 绕开（推荐）：标准注意力模型跑全部验证/上线，DSpark 收益不少。
-- 攻（若要 MLA 模型）：重造 radix-tree 缓存 + FP8 布局、注入 kernel、FlashMLA 读端 + DeepGEMM、jit_kernel 编译框架。
 
 ### 10.3 两卡关键差异
 
